@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nextread — what to listen to next</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a class="skip" href="#own">Skip to recommendations</a>
+
+  <header>
+    <h1>Nextread</h1>
+    <p>Built from {{ seeds }} book{{ '' if seeds == 1 else 's' }} you've listened to, out of {{ library }} in the library.</p>
+  </header>
+
+  <!-- Status region is present on every load, empty when there is nothing to
+       say, so a screen reader announces changes rather than missing the node. -->
+  <div id="status" role="status" aria-live="polite">
+    {% if msg %}<p class="ok">{{ msg }}</p>{% endif %}
+    {% if err %}<p class="err">{{ err }}</p>{% endif %}
+  </div>
+
+  <form method="post" action="/refresh">
+    <button type="submit">Refresh recommendations</button>
+  </form>
+
+  <main>
+    <h2 id="own">Already on your shelf</h2>
+    <p>These are in your library and unplayed. They're also saved as the
+      <strong>{{ playlist_name }}</strong> playlist, so they show up in EchoFin.</p>
+
+    {% if own %}
+    <ol class="shelf">
+      {% for b in own %}
+      <li>
+        <h3>{{ b.title }}</h3>
+        {% if b.authors %}<p class="by">by {{ b.authors | join(', ') }}</p>{% endif %}
+        {% if b.why %}
+        <ul class="why">
+          {% for reason in b.why %}<li>{{ reason }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p>Nothing to suggest from your own shelf yet. Finish a book or two and it'll
+      have something to work from.</p>
+    {% endif %}
+
+    <h2 id="discover">Worth getting hold of</h2>
+    <p>Not in your library. Approving one hands it to Listenarr to find.</p>
+
+    {% if discover %}
+    <ol class="shelf">
+      {% for b in discover %}
+      <li>
+        <h3>{{ b.title }}</h3>
+        {% if b.authors %}<p class="by">by {{ b.authors | join(', ') }}</p>{% endif %}
+        {% if b.narrators %}<p class="by">narrated by {{ b.narrators | join(', ') }}</p>{% endif %}
+        {% if b.runtime_min %}<p class="meta">{{ (b.runtime_min // 60) }}h {{ (b.runtime_min % 60) }}m</p>{% endif %}
+        {% if b.why %}
+        <ul class="why">
+          {% for reason in b.why %}<li>{{ reason }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        <div class="actions">
+          <form method="post" action="/want">
+            <input type="hidden" name="asin" value="{{ b.asin }}">
+            <input type="hidden" name="title" value="{{ b.title }}">
+            <!-- Accessible name carries the title so a list of buttons is not
+                 twenty identical "Want it"s. -->
+            <button type="submit">Want it — {{ b.title }}</button>
+          </form>
+          <form method="post" action="/dismiss">
+            <input type="hidden" name="asin" value="{{ b.asin }}">
+            <input type="hidden" name="title" value="{{ b.title }}">
+            <button type="submit" class="secondary">Not interested — {{ b.title }}</button>
+          </form>
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p>No new suggestions right now.</p>
+    {% endif %}
+  </main>
+</body>
+</html>

@@ -1,0 +1,50 @@
+services:
+  nextread:
+    image: nextread:local
+    container_name: nextread
+    restart: unless-stopped
+    environment:
+      # Jellyfin is the single library of record.
+      JELLYFIN_URL: "http://jellyfin:8096"
+      # Read from .env beside this file, which is gitignored.
+      JELLYFIN_TOKEN: "${JELLYFIN_TOKEN}"
+      JELLYFIN_USER: "matt"
+      # Audio Books, Graphic audio
+      LIBRARY_IDS: "3aeb99515c5a4d67fe12f482a99e3d6c,37d6a841204ee1d6e58b0d35b973f7cc"
+      # Listenarr is a write-only acquisition sink plus a queue-state read.
+      LISTENARR_URL: "http://listenarr:4545"
+      LISTENARR_QUALITY_PROFILE_ID: "1"
+      PLAYLIST_NAME: "Next Read"
+      DB_PATH: "/data/nextread.db"
+      TZ: "America/Vancouver"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+      - traefik.enable=true
+      - "traefik.http.routers.nextread.rule=Host(`nextread.thealvernaz.space`) || Host(`www.nextread.thealvernaz.space`)"
+      - traefik.http.routers.nextread.entrypoints=websecure
+      - traefik.http.routers.nextread.middlewares=www-to-nonwww@file,access-nextread@file
+      - traefik.http.routers.nextread.tls=true
+      - traefik.http.routers.nextread.tls.certresolver=le-dns
+      - traefik.http.routers.nextread.tls.domains[0].main=nextread.thealvernaz.space
+      - traefik.http.routers.nextread.tls.domains[0].sans=www.nextread.thealvernaz.space
+      - traefik.http.services.nextread.loadbalancer.server.port=8080
+      - "traefik.http.routers.nextread-public.rule=Host(`nextread.thealvernaz.space`) && PathPrefix(`/favicon`)"
+      - traefik.http.routers.nextread-public.entrypoints=websecure
+      - traefik.http.routers.nextread-public.tls=true
+      - traefik.http.routers.nextread-public.tls.certresolver=le-dns
+      - traefik.http.routers.nextread-public.service=nextread
+      - traefik.http.routers.nextread-public.priority=100
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true

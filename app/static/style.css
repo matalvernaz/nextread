@@ -1,0 +1,24 @@
+:root { color-scheme: light dark; }
+body {
+  font: 1rem/1.5 system-ui, sans-serif;
+  max-width: 44rem; margin: 0 auto; padding: 1rem 1.25rem 4rem;
+}
+.skip { position: absolute; left: -9999px; }
+.skip:focus { position: static; display: inline-block; padding: .5rem; }
+h1 { margin-bottom: .25rem; }
+h2 { margin-top: 2.5rem; }
+h3 { margin: 0 0 .25rem; font-size: 1.05rem; }
+.shelf { padding-left: 1.5rem; }
+.shelf > li { margin-bottom: 1.75rem; }
+.by, .meta { margin: .1rem 0; }
+.meta { opacity: .8; }
+.why { margin: .4rem 0 .6rem; padding-left: 1.25rem; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+button {
+  font: inherit; padding: .5rem .9rem; cursor: pointer;
+  border: 2px solid currentColor; border-radius: .35rem; background: transparent;
+}
+button:focus-visible { outline: 3px solid; outline-offset: 2px; }
+.secondary { opacity: .75; }
+#status:empty { display: none; }
+.ok, .err { padding: .6rem .8rem; border-left: 4px solid currentColor; margin: .5rem 0; }
