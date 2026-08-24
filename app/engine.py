@@ -46,6 +46,81 @@ def _people(item: dict, kind: str) -> list[str]:
     return [p["Name"] for p in (item.get("People") or []) if p.get("Type") == kind and p.get("Name")]
 
 
+def _authors(item: dict) -> list[str]:
+    """Authors from People, falling back to AlbumArtist.
+
+    Not interchangeable: 84 of this library's books carry no Author person but do
+    carry an AlbumArtist, and reading only People silently drops them from both
+    the taste profile and the owned-check.
+    """
+    names = _people(item, "Author")
+    if names:
+        return names
+    artist = item.get("AlbumArtist")
+    return [artist] if artist else []
+
+
+def _norm(text: str) -> str:
+    """Lowercase, punctuation-stripped, whitespace-collapsed."""
+    return " ".join("".join(c if c.isalnum() or c.isspace() else " " for c in text).lower().split())
+
+
+def _title_keys(title: str) -> set[str]:
+    """Normalised forms a title might be matched under.
+
+    Editions differ: the same book is "Dark Lord of the Farmstead" on Audible and
+    "Dark Lord of the Farmstead: A High Fantasy Slice-of-Life LitRPG" in the
+    library, under two different ASINs. The subtitle-stripped form bridges that.
+    Trailing volume numbers are deliberately NOT stripped -- "Master Class" and
+    "Master Class 2" are different books and must not collide.
+    """
+    keys = set()
+    full = _norm(title)
+    if full:
+        keys.add(full)
+    for sep in (":", " - ", " \u2014 "):
+        if sep in title:
+            head = _norm(title.split(sep, 1)[0])
+            # Two words minimum, or short titles collide across unrelated books.
+            if head and len(head.split()) >= 2:
+                keys.add(head)
+    return keys
+
+
+def _owned_index(library: list[dict]) -> tuple[set[str], dict[str, set[str]]]:
+    """ASINs owned, and normalised-title -> author-set for everything else.
+
+    ASIN alone is not enough: 76% of this library carries no Audible ASIN at all,
+    so an ASIN-only check would recommend three quarters of the collection back.
+    """
+    asins = {_asin(i) for i in library if _asin(i)}
+    by_title: dict[str, set[str]] = defaultdict(set)
+    for item in library:
+        authors = {_norm(a) for a in _authors(item)}
+        for key in _title_keys(item.get("Name") or ""):
+            by_title[key] |= authors
+    return asins, by_title
+
+
+def _already_owned(cand: dict, asins: set[str], by_title: dict[str, set[str]]) -> bool:
+    """True when a candidate is a book already on disk under any edition.
+
+    Title agreement alone would over-suppress, so an author must agree too --
+    except where the library row has no author at all, which is the one case
+    where the title has to stand on its own.
+    """
+    if cand["asin"] in asins:
+        return True
+    cand_authors = {_norm(a) for a in cand.get("authors") or []}
+    for key in _title_keys(cand.get("title") or ""):
+        if key not in by_title:
+            continue
+        owners = by_title[key]
+        if not owners or (cand_authors & owners):
+            return True
+    return False
+
+
 def _taste(seeds: list[dict]) -> dict:
     """Build a taste profile from HIS play history only.
 
@@ -59,7 +134,7 @@ def _taste(seeds: list[dict]) -> dict:
     for item in seeds:
         for g in item.get("Genres") or []:
             genres[g] += 1
-        for a in _people(item, "Author"):
+        for a in _authors(item):
             authors[a] += 1
         for n in _people(item, "Narrator"):
             narrators[n] += 1
@@ -87,7 +162,7 @@ def _score_owned(item: dict, taste: dict, votes: Counter) -> tuple[float, list[s
         score += W_SIMS_VOTE * votes[asin]
         why.append(f"Audible lists it alongside {votes[asin]} book(s) you've listened to")
 
-    shared_authors = [a for a in _people(item, "Author") if a in taste["authors"]]
+    shared_authors = [a for a in _authors(item) if a in taste["authors"]]
     if shared_authors:
         score += W_AUTHOR * len(shared_authors)
         why.append("by " + ", ".join(shared_authors[:2]) + ", who you've listened to")
@@ -139,7 +214,7 @@ def run(update_playlist: bool = True) -> dict:
     votes: Counter = Counter()
     seed_of: dict[str, list[str]] = defaultdict(list)
     unowned: dict[str, dict] = {}
-    owned_asins = {_asin(i) for i in library if _asin(i)}
+    owned_asins, owned_titles = _owned_index(library)
 
     for seed in seeds:
         asin = _asin(seed)
@@ -148,7 +223,7 @@ def run(update_playlist: bool = True) -> dict:
         for sim in audible.sims(asin):
             votes[sim["asin"]] += 1
             seed_of[sim["asin"]].append(seed.get("Name") or "")
-            if sim["asin"] not in owned_asins:
+            if not _already_owned(sim, owned_asins, owned_titles):
                 unowned.setdefault(sim["asin"], sim)
 
     # --- own shelf: on disk, unplayed, ranked ---
@@ -162,7 +237,7 @@ def run(update_playlist: bool = True) -> dict:
         own.append({
             "id": item["Id"],
             "title": item.get("Name") or "",
-            "authors": _people(item, "Author"),
+            "authors": _authors(item),
             "series": item.get("SeriesName"),
             "score": round(score, 1),
             "why": why,

@@ -16,7 +16,7 @@ _HEADERS = {
 # Jellyfin omits most of them by default.
 _ITEM_FIELDS = (
     "ProviderIds,Genres,UserData,DateCreated,People,Overview,RunTimeTicks,"
-    "SeriesName,IndexNumber,ParentIndexNumber"
+    "SeriesName,IndexNumber,ParentIndexNumber,AlbumArtist"
 )
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
