@@ -112,6 +112,22 @@ def audible_metadata(asin: str) -> dict | None:
     return _to_add_metadata(exact or results[0])
 
 
+def audible_search(query: str, limit: int = 25) -> list[dict]:
+    """Free-text Audible catalogue search, via Listenarr.
+
+    Audible's own `/catalog/products?keywords=` returns nothing unauthenticated;
+    Listenarr's provider is authenticated, so this is the only route to keyword
+    and genre discovery without standing up Audible credentials of our own.
+    """
+    try:
+        with _client() as c:
+            resp = c.get(f"{_API}/search/audible", params={"query": query})
+            resp.raise_for_status()
+            return (resp.json().get("results") or [])[:limit]
+    except (httpx.HTTPError, ValueError):
+        return []
+
+
 def exists(asin: str) -> bool:
     """True when Listenarr already has a row for this ASIN.
 

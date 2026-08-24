@@ -10,11 +10,26 @@ from contextlib import contextmanager
 
 from . import config
 
+# Bumped whenever the shape of a cached sims payload changes. A stale entry is
+# worse than a miss: it looks fresh and silently scores zero on fields that were
+# not being kept when it was written.
+SIMS_SCHEMA_VERSION = 2
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sims (
-    asin        TEXT PRIMARY KEY,
+    cache_key   TEXT PRIMARY KEY,
     payload     TEXT NOT NULL,
     fetched_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS doc_vectors (
+    item_id     TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    built_at    REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS submitted (
     asin        TEXT PRIMARY KEY,
@@ -49,26 +64,70 @@ def db():
 
 
 def init() -> None:
+    """Create the cache, dropping the sims table outright on a version change.
+
+    `CREATE TABLE IF NOT EXISTS` will not reshape an existing table, so a version
+    bump has to DROP: v1 keyed on `asin` alone, which collides once one ASIN has a
+    neighbour set per similarity axis.
+    """
     with db() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='sims_schema_version'").fetchone()
+        if row is None or int(row["value"]) != SIMS_SCHEMA_VERSION:
+            # It is a cache; refetching costs one request per seed per axis.
+            conn.execute("DROP TABLE IF EXISTS sims")
+            conn.execute("DROP TABLE IF EXISTS doc_vectors")
+            conn.execute(
+                "INSERT INTO meta(key,value) VALUES('sims_schema_version',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(SIMS_SCHEMA_VERSION),))
         conn.executescript(SCHEMA)
 
 
-def get_sims(asin: str):
-    """Return cached sims for an ASIN, or None if absent or stale."""
+def _sims_key(asin: str, axis: str) -> str:
+    """Cache key. The axis is part of it: one ASIN has a different neighbour set
+    per `similarity_type`, and keying on the ASIN alone collides across axes."""
+    return f"{asin}:{axis}"
+
+
+def get_sims(asin: str, axis: str):
+    """Return cached sims for an (ASIN, axis), or None if absent or stale."""
     cutoff = time.time() - config.SIMS_TTL_HOURS * 3600
     with db() as conn:
         row = conn.execute(
-            "SELECT payload FROM sims WHERE asin=? AND fetched_at>?", (asin, cutoff)
+            "SELECT payload FROM sims WHERE cache_key=? AND fetched_at>?",
+            (_sims_key(asin, axis), cutoff),
         ).fetchone()
     return json.loads(row["payload"]) if row else None
 
 
-def put_sims(asin: str, payload) -> None:
+def put_sims(asin: str, axis: str, payload) -> None:
     with db() as conn:
         conn.execute(
-            "INSERT INTO sims(asin,payload,fetched_at) VALUES(?,?,?) "
-            "ON CONFLICT(asin) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
-            (asin, json.dumps(payload), time.time()),
+            "INSERT INTO sims(cache_key,payload,fetched_at) VALUES(?,?,?) "
+            "ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
+            (_sims_key(asin, axis), json.dumps(payload), time.time()),
+        )
+
+
+def get_vectors(kind: str) -> dict:
+    """Cached sparse TF-IDF vectors, keyed by Jellyfin item id."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT item_id, payload FROM doc_vectors WHERE kind=?", (kind,)
+        ).fetchall()
+    return {r["item_id"]: json.loads(r["payload"]) for r in rows}
+
+
+def put_vectors(kind: str, vectors: dict) -> None:
+    now = time.time()
+    with db() as conn:
+        conn.execute("DELETE FROM doc_vectors WHERE kind=?", (kind,))
+        conn.executemany(
+            "INSERT INTO doc_vectors(item_id,kind,payload,built_at) VALUES(?,?,?,?)",
+            [(k, kind, json.dumps(v), now) for k, v in vectors.items()],
         )
 
 
