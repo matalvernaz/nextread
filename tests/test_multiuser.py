@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from app import engine, jellyfin, main
+from app import engine, jellyfin, main, shelves
 
 
 def request(username: str | None = None) -> Request:
@@ -39,22 +39,69 @@ finally:
 
 
 calls = []
-real_run = main.engine.run
-main.engine.run = lambda user: calls.append(user.key) or {"user_name": user.name}
-main._invalidate()
+real_run = shelves.engine.run
+shelves.engine.run = (
+    lambda user, update_playlist=True:
+    calls.append(user.key) or {"user_name": user.name, "own": []})
+shelves.invalidate()
 try:
-    assert main._result(matt)["user_name"] == "matt"
-    assert main._result(alex)["user_name"] == "Alex"
-    assert main._result(matt)["user_name"] == "matt"
+    assert shelves.result(matt)["user_name"] == "matt"
+    assert shelves.result(alex)["user_name"] == "Alex"
+    assert shelves.result(matt)["user_name"] == "matt"
     assert calls == ["matt", "alex"]
 
-    main._invalidate("matt")
-    main._result(matt)
-    main._result(alex)
+    shelves.invalidate("matt")
+    shelves.result(matt)
+    shelves.result(alex)
     assert calls == ["matt", "alex", "matt"]
 finally:
-    main.engine.run = real_run
-    main._invalidate()
+    shelves.engine.run = real_run
+    shelves.invalidate()
+
+
+# An API read must not write a playlist, and must not let a later web read skip
+# the write either -- the cache entry is shared between the two surfaces.
+written = []
+real_run = shelves.engine.run
+real_set = shelves.jellyfin.set_playlist
+shelves.engine.run = (
+    lambda user, update_playlist=True: {
+        "user_name": user.name,
+        "own": [{"id": "item-1"}],
+        "playlist_name": "Next Read",
+        "discover": [],
+    })
+shelves.jellyfin.set_playlist = (
+    lambda uid, name, ids: written.append((uid, name, tuple(ids))) or "playlist-1")
+shelves.invalidate()
+try:
+    shelves.result(matt, update_playlist=False)
+    assert written == [], "a GET on the API path must not write a playlist"
+    shelves.result(matt)
+    assert written == [("user-matt", "Next Read", ("item-1",))], written
+    shelves.result(matt)
+    assert len(written) == 1, "a settled entry must not write again"
+finally:
+    shelves.engine.run = real_run
+    shelves.jellyfin.set_playlist = real_set
+    shelves.invalidate()
+
+
+# One person's request removes that book from everybody's shelf, and nothing
+# else: clearing every cache would push every account through a cold recompute.
+shelves.invalidate()
+with shelves._cache_guard:
+    shelves._cache["matt"] = (
+        shelves.time.monotonic(),
+        {"discover": [{"asin": "A1"}, {"asin": "A2"}], "own": []}, True)
+    shelves._cache["alex"] = (
+        shelves.time.monotonic(),
+        {"discover": [{"asin": "A1"}], "own": []}, True)
+shelves.forget_asin("A1")
+assert [r["asin"] for r in shelves._cache["matt"][1]["discover"]] == ["A2"]
+assert shelves._cache["alex"][1]["discover"] == []
+assert set(shelves._cache) == {"matt", "alex"}, "no entry may be evicted"
+shelves.invalidate()
 
 
 assert engine._playlist_name(matt) == main.config.PLAYLIST_NAME

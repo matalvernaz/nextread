@@ -51,6 +51,26 @@
       have something to work from.</p>
     {% endif %}
 
+    {% if requests %}
+    <h2 id="requests">Books you asked for</h2>
+    <ol class="shelf">
+      {% for r in requests %}
+      <li>
+        <h3>{{ r.title or r.asin }}</h3>
+        <p class="meta">
+          {%- if r.state == 'in_library' -%}
+            In your library
+          {%- elif r.state == 'still_looking' -%}
+            Still looking. It stays on the list and gets retried.
+          {%- else -%}
+            On its way
+          {%- endif -%}
+        </p>
+      </li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+
     <h2 id="discover">Worth getting hold of</h2>
     <p>Not in your library. Approving one hands it to Listenarr to find.</p>
 

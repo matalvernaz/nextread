@@ -18,7 +18,9 @@ one early score reorder the whole shelf.
 """
 from collections import Counter, defaultdict
 
-from . import audible, config, jellyfin, listenarr, store, textmodel
+from . import audible, config, jellyfin, listenarr, logs, store, textmodel
+
+log = logs.get("engine")
 
 # Relative weights. Series continuation dominates on purpose: if a listener is
 # five books into something and owns the sixth, that is the answer.
@@ -605,12 +607,19 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             user.id, playlist_name, [r["id"] for r in own]
         )
 
+    log.info("run user=%s library=%d seeds=%d ratings=%d blend=%.2f "
+             "own=%d unowned=%d playlist=%s",
+             user.key, len(library), len(seeds), rating_count, blend,
+             len(own), len(discover), playlist_id or "skipped")
     store.finish_run(run_id, len(seeds), len(own), len(discover),
                      note=(f"playlist={playlist_id or 'skipped'} ratings={rating_count} "
                            f"blend={blend:.2f} sim_seeds={similarity_seeds} "
                            f"queries={','.join(queries)}"))
     return {
         "user_name": user.name,
+        # Every ASIN on disk. A requested book has arrived when its ASIN turns
+        # up here, which is the whole of the arrival check -- no status to poll.
+        "owned_asins": owned_asins,
         "seeds": len(seeds),
         "library": len(library),
         "ratings": rating_count,

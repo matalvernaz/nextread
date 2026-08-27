@@ -5,9 +5,13 @@ only what it has bought (85 rows against Jellyfin's 1028), so Nextread never
 uses it to answer "what do I have". It does ask "what is already on order", to
 avoid recommending a book that is mid-acquisition.
 """
+from typing import NamedTuple
+
 import httpx
 
-from . import config
+from . import config, logs
+
+log = logs.get("listenarr")
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _API = "/api/v1"
@@ -36,9 +40,15 @@ def queued_asins() -> set[str]:
     try:
         with _client() as c:
             rows = c.get(f"{_API}/library").raise_for_status().json()
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, ValueError) as exc:
+        # Failing soft here means every book already on order becomes
+        # recommendable again. Silent, and it looks exactly like a good shelf.
+        log.warning("queue-state read failed (%s); suppression list is empty "
+                    "this pass, so books already on order may be re-offered", exc)
         return set()
-    return {r["asin"] for r in rows if r.get("asin")}
+    asins = {r["asin"] for r in rows if r.get("asin")}
+    log.debug("queue state: %d ASINs on order", len(asins))
+    return asins
 
 
 def _names(values) -> list[str]:
@@ -104,9 +114,11 @@ def audible_metadata(asin: str) -> dict | None:
             resp = c.get(f"{_API}/search/audible", params={"query": asin})
             resp.raise_for_status()
             results = resp.json().get("results") or []
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("metadata lookup failed asin=%s (%s)", asin, exc)
         return None
     if not results:
+        log.warning("metadata lookup found nothing asin=%s", asin)
         return None
     exact = next((r for r in results if (r.get("asin") or "").upper() == asin.upper()), None)
     return _to_add_metadata(exact or results[0])
@@ -123,13 +135,32 @@ def audible_search(query: str, limit: int = 25) -> list[dict]:
         with _client() as c:
             resp = c.get(f"{_API}/search/audible", params={"query": query})
             resp.raise_for_status()
-            return (resp.json().get("results") or [])[:limit]
-    except (httpx.HTTPError, ValueError):
+            results = (resp.json().get("results") or [])[:limit]
+    except (httpx.HTTPError, ValueError) as exc:
+        # This is also the ASIN resolver for the three quarters of the library
+        # with no Audible id of its own, so losing it quietly thins the unowned
+        # shelf rather than emptying it -- which is why it is logged loudly.
+        log.warning("Audible search failed query=%r (%s); ASIN resolution and "
+                    "keyword discovery are blind this pass", query, exc)
         return []
+    log.debug("Audible search query=%r hits=%d", query, len(results))
+    return results
 
 
-def exists(asin: str) -> bool:
-    """True when Listenarr already has a row for this ASIN.
+class AddResult(NamedTuple):
+    """Outcome of handing one book to Listenarr.
+
+    `ok` means the book is now in Listenarr's library and will be acquired --
+    including the case where it was already there, because the caller's
+    question is "is this book coming?" and the answer is yes either way.
+    """
+    ok: bool
+    message: str
+    audiobook_id: int | None
+
+
+def find_by_asin(asin: str) -> dict | None:
+    """Listenarr's row for this ASIN, or None.
 
     Checked before every add: duplicate Audible editions are a known live
     nuisance and the add endpoint is not assumed to dedupe.
@@ -137,26 +168,36 @@ def exists(asin: str) -> bool:
     try:
         with _client() as c:
             resp = c.get(f"{_API}/library/by-asin/{asin}")
-    except httpx.HTTPError:
-        return False
-    return resp.status_code == 200
+    except httpx.HTTPError as exc:
+        log.warning("by-asin lookup failed asin=%s (%s); treating as absent, "
+                    "so the add may hit a duplicate", asin, exc)
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        return resp.json()
+    except ValueError:
+        return None
 
 
-def add(asin: str, monitored: bool = True) -> tuple[bool, str]:
-    """Hand one book to Listenarr to acquire. Returns (ok, message).
+def add(asin: str, monitored: bool = True) -> AddResult:
+    """Hand one book to Listenarr to acquire.
 
     `AutoSearch` stays False on purpose -- it is an inline await, so True would
-    block this request on serialised indexer searches. The 6-hourly
-    AutomaticSearchService sweep picks up anything monitored with a profile.
+    block this request on serialised indexer searches. Immediate acquisition
+    comes from `enqueue_search` instead, which hands the job to Listenarr's own
+    paced queue; the 6-hourly AutomaticSearchService sweep remains the fallback
+    for anything that queue never manages to satisfy.
 
     `SearchResult` is left unset: supplying one bypasses release scoring entirely.
     """
-    if exists(asin):
-        return False, "Already in Listenarr"
+    existing = find_by_asin(asin)
+    if existing is not None:
+        return AddResult(True, "Already in Listenarr", _audiobook_id(existing))
 
     meta = audible_metadata(asin)
     if not meta:
-        return False, "No Audible metadata found for that ASIN"
+        return AddResult(False, "No Audible metadata found for that ASIN", None)
 
     body = {
         "metadata": meta,
@@ -173,11 +214,61 @@ def add(asin: str, monitored: bool = True) -> tuple[bool, str]:
                 headers={"X-XSRF-TOKEN": token},
             )
     except httpx.HTTPError as exc:
-        return False, f"Listenarr unreachable: {exc}"
+        log.error("add failed asin=%s: Listenarr unreachable (%s)", asin, exc)
+        return AddResult(False, f"Listenarr unreachable: {exc}", None)
 
+    # 409 is Listenarr saying the book is already in its library, and it returns
+    # the existing row with it. Two people asking for the same book at the same
+    # moment both pass the by-asin check, so one of them lands here; the book is
+    # coming either way, which is what the caller asked.
+    if resp.status_code >= 400 and resp.status_code != 409:
+        log.error("add rejected asin=%s status=%d body=%s",
+                  asin, resp.status_code, resp.text[:180])
+        return AddResult(False, f"Listenarr said {resp.status_code}: {resp.text[:180]}", None)
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = {}
+    message = "Already in Listenarr" if resp.status_code == 409 else "Sent to Listenarr"
+    return AddResult(True, message, _audiobook_id(payload.get("audiobook")))
+
+
+def _audiobook_id(row) -> int | None:
+    """The numeric id out of an audiobook row, whatever case it arrives in."""
+    if not isinstance(row, dict):
+        return None
+    value = row.get("id", row.get("Id"))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def enqueue_search(audiobook_id: int) -> bool:
+    """Ask Listenarr to search for one book now, without waiting for the sweep.
+
+    The work is queued, never awaited: Listenarr drains the queue through a
+    single paced consumer, which is exactly what stops ten accounts tapping at
+    once from becoming ten simultaneous indexer hits. A False here is not a
+    failure worth surfacing -- the book is monitored, so the 6-hourly sweep
+    still acquires it. That also covers a Listenarr too old to have the route.
+    """
+    try:
+        with _client() as c:
+            token = _csrf(c)
+            resp = c.post(
+                f"{_API}/download/queue-search",
+                json={"audiobookId": audiobook_id, "reason": "nextread"},
+                headers={"X-XSRF-TOKEN": token},
+            )
+    except httpx.HTTPError as exc:
+        log.warning("search queue unreachable audiobook_id=%s (%s)", audiobook_id, exc)
+        return False
     if resp.status_code >= 400:
-        return False, f"Listenarr said {resp.status_code}: {resp.text[:180]}"
-    return True, "Sent to Listenarr"
+        log.warning("search queue rejected audiobook_id=%s status=%d body=%s",
+                    audiobook_id, resp.status_code, resp.text[:180])
+        return False
+    return True
 
 
 def delete(audiobook_id: int) -> bool:

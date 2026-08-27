@@ -7,7 +7,9 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import config
+from . import config, logs
+
+log = logs.get("jellyfin")
 
 _HEADERS = {
     "Authorization": f'MediaBrowser Token="{config.JELLYFIN_TOKEN}"',
@@ -28,6 +30,7 @@ _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 class User:
     id: str
     name: str
+    is_admin: bool = False
 
     @property
     def key(self) -> str:
@@ -46,8 +49,83 @@ def user(name: str | None = None) -> User:
         users = c.get("/Users").raise_for_status().json()
     for u in users:
         if u["Name"].casefold() == name.casefold():
-            return User(id=u["Id"], name=u["Name"])
+            return _to_user(u)
+    log.warning("no Jellyfin account matches signed-in user %r", name)
     raise LookupError(f"no Jellyfin user named {name!r}")
+
+
+def _to_user(dto: dict) -> User:
+    """A Jellyfin UserDto as this app's user. Administrator means keyholder."""
+    policy = dto.get("Policy") or {}
+    return User(id=dto["Id"], name=dto["Name"],
+                is_admin=bool(policy.get("IsAdministrator")))
+
+
+class TokenRejected(Exception):
+    """The caller's Jellyfin access token is missing, malformed, or unknown."""
+
+
+class JellyfinUnavailable(Exception):
+    """Jellyfin could not be reached, so no token can be judged either way."""
+
+
+def user_from_token(token: str) -> User:
+    """The account a caller's own Jellyfin access token belongs to.
+
+    This is the whole of the JSON API's authentication, and it deliberately has
+    no fallback. `GET /Users/Me` answers 200 only for a real user token: a
+    service API key carries no user context and gets 400, and an unknown token
+    gets 401 (all three verified against this fork). Anything that is not a 200
+    is a rejection.
+
+    The header resolver used by the HTML pages falls back to JELLYFIN_USER when
+    no identity is present. That fallback must never be reachable from here --
+    the API path bypasses SSO at the proxy, so it would hand any caller the
+    owner's shelf and his daily allowance.
+    """
+    if not token:
+        raise TokenRejected("no access token")
+    headers = {"Authorization": f'MediaBrowser Token="{token}"',
+               "Accept": "application/json"}
+    try:
+        with httpx.Client(base_url=config.JELLYFIN_URL, headers=headers,
+                          timeout=_TIMEOUT) as c:
+            resp = c.get("/Users/Me")
+    except httpx.HTTPError as exc:
+        log.error("token introspection unreachable fingerprint=%s (%s)",
+                  logs.fingerprint(token), exc)
+        raise JellyfinUnavailable(str(exc)) from exc
+    if resp.status_code != 200:
+        # 401 is an unknown token; 400 is a service API key, which has no user
+        # behind it. Neither may be allowed through.
+        log.warning("token rejected fingerprint=%s status=%d",
+                    logs.fingerprint(token), resp.status_code)
+        raise TokenRejected(f"Jellyfin answered {resp.status_code}")
+    try:
+        user = _to_user(resp.json())
+    except (ValueError, KeyError) as exc:
+        log.error("token introspection returned an unreadable user fingerprint=%s",
+                  logs.fingerprint(token))
+        raise TokenRejected("Jellyfin returned an unreadable user") from exc
+    log.info("token accepted fingerprint=%s user=%s keyholder=%s",
+             logs.fingerprint(token), user.name, user.is_admin)
+    return user
+
+
+def token_from_header(value: str | None) -> str:
+    """The Token= field of a Jellyfin `Authorization` header, or "".
+
+    Clients send the whole handshake, not a bare token:
+    `MediaBrowser Token="abc", Client="EchoFin", Device="iPhone", ...`.
+    Order is not guaranteed, so the field is picked out by name.
+    """
+    if not value:
+        return ""
+    for part in value.split(","):
+        key, sep, raw = part.strip().partition("=")
+        if sep and key.strip().rpartition(" ")[2].casefold() == "token":
+            return raw.strip().strip('"')
+    return ""
 
 
 def user_id(name: str | None = None) -> str:

@@ -89,6 +89,85 @@ noun, so idf hands it top weight and the profile comes out as series names
 Keyword discovery exists and is **off** — see the reasoning in `app/config.py`.
 It failed on real data twice and needs more ratings, not more code.
 
+## Requesting a book
+
+Asking for an unowned book is one action with one code path, shared by the web
+form and the JSON API, so a second caller cannot be added later that skips half
+the guards.
+
+What happens on a request: Listenarr is checked for the ASIN, the book is added
+monitored, the request is written to this app's ledger, and a search is **queued**
+with Listenarr rather than awaited. The queue has a single paced consumer, which
+is what stops ten accounts tapping at once from becoming ten simultaneous
+indexer hits. If the queue refuses the job -- or the Listenarr in front of you
+is too old to have the route -- nothing is lost: the book is monitored, so the
+6-hourly sweep still acquires it.
+
+Afterwards the request has one of three states, and all three are derived
+rather than fetched:
+
+| State | Means |
+|---|---|
+| `on_its_way` | asked for, not yet on disk |
+| `still_looking` | waiting longer than `STILL_LOOKING_AFTER_HOURS`. Not a failure: the book stays monitored and keeps being retried |
+| `in_library` | its ASIN is now among the library's, so it is an ordinary item |
+
+Arrival is a set-membership test against the ASINs already on disk, which the
+engine builds on every run anyway. There is no status to poll and nothing to
+subscribe to. It follows that the round trip depends on the imported file
+carrying its Audible ASIN through to Jellyfin -- if that tag is lost, a book
+arrives and its row stays `still_looking` for ever.
+
+`WANT_DAILY_CAP` bounds how many books a non-keyholder may request per rolling
+day; Jellyfin administrators are not capped. It exists because opening requests
+to every account **and** searching immediately removes both of the brakes this
+app used to have (keyholder-only access, and a six-hour wait for the sweep).
+A repeated request for the same book is free: the ledger is keyed on
+(account, ASIN), so a second tap neither restarts the clock nor spends another
+day's allowance.
+
+Requests are suppressed globally, dismissals only for the person who made them.
+Listenarr is shared, so a book one listener asks for is acquired once and stops
+being offered to everybody else.
+
+## JSON API
+
+For clients that cannot complete a browser sign-in -- which is every native app.
+`GET /api/v1/capabilities`, `GET /api/v1/shelves`, `POST /api/v1/want`,
+`POST /api/v1/dismiss`.
+
+**Authentication is the caller's own Jellyfin access token**, sent as
+`Authorization: MediaBrowser Token="..."` or `X-Emby-Token`, never in a query
+string. Nextread introspects it with `GET /Users/Me`, which answers 200 only for
+a real user token: a service API key has no user context and gets 400, an
+unknown token gets 401. Anything that is not a 200 is a rejection, and Jellyfin
+being unreachable is a 503 rather than a guess.
+
+This path is reachable **without** the SSO middleware, so it deliberately does
+not share the HTML resolver's fallback to `JELLYFIN_USER`. That fallback on a
+bypassed route would hand any caller the owner's shelf and his allowance.
+
+Two things follow for the proxy in front of it: the `/api/` router needs its own
+Traefik rule with **explicit priorities pinned on both it and the main router**
+(priority defaults to rule length, so lengthening the main rule can silently
+swallow a bypass), and `/`, `/want` and `/dismiss` must keep their SSO chain.
+
+`GET /shelves` has no side effects. It returns owned picks as Jellyfin **item
+ids** rather than rendered rows, so a client hydrates them through its ordinary
+item request and keeps resume position, downloads and play-on-activation. Only
+the unowned half is described in full, because it has no library item to
+describe.
+
+## Logging
+
+Every acquisition is asynchronous and crosses three services, and no screen ever
+shows the whole of one. `app/logs.py` is where the level is set (`LOG_LEVEL`,
+default INFO) and it holds the two standing rules: never log an access token
+(log `fingerprint()` of it), and log the *soft* failures loudest. The paths that
+return an empty list when Listenarr is unreachable are the ones that degrade
+invisibly -- a missing suppression list looks exactly like a good shelf, and a
+failed Audible search quietly thins the unowned half rather than emptying it.
+
 ## Configuration
 
 All configuration comes from the environment; see `app/config.py`.
@@ -101,6 +180,13 @@ All configuration comes from the environment; see `app/config.py`.
   keeps the unsuffixed `PLAYLIST_NAME`.
 - `PLAYLIST_NAME` defaults to `Next Read`.
 - `LIBRARY_IDS` limits the audiobook libraries included in every user's model.
+- `WANT_DAILY_CAP` (default 3) bounds requests per non-keyholder per day.
+- `STILL_LOOKING_AFTER_HOURS` (default 12) is when a request stops claiming to
+  be arriving. Two sweep cycles.
+- `TOKEN_CACHE_SECONDS` (default 60) is how long an introspected access token
+  stays trusted. Short because expiry is the only thing that makes a token
+  revoked in Jellyfin stop working here.
+- `LOG_LEVEL` (default INFO).
 
 The database migration is automatic and transactional. Existing submitted
 books, dismissals, and run history are assigned to `JELLYFIN_USER`; subsequent

@@ -24,6 +24,17 @@ CREATE TABLE IF NOT EXISTS submitted (
 );
 """
 
+_REQUESTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS requests (
+    user_key     TEXT NOT NULL,
+    asin         TEXT NOT NULL,
+    title        TEXT,
+    requested_at REAL NOT NULL,
+    fulfilled_at REAL,
+    PRIMARY KEY (user_key, asin)
+);
+"""
+
 _DISMISSED_SCHEMA = """
 CREATE TABLE IF NOT EXISTS dismissed (
     user_key    TEXT NOT NULL,
@@ -67,7 +78,7 @@ CREATE TABLE IF NOT EXISTS doc_vectors (
     payload     TEXT NOT NULL,
     built_at    REAL NOT NULL
 );
-""" + _SUBMITTED_SCHEMA + _DISMISSED_SCHEMA + _RUNS_SCHEMA
+""" + _SUBMITTED_SCHEMA + _REQUESTS_SCHEMA + _DISMISSED_SCHEMA + _RUNS_SCHEMA
 
 
 @contextmanager
@@ -103,6 +114,7 @@ def init() -> None:
                 (str(SIMS_SCHEMA_VERSION),))
         conn.executescript(SCHEMA)
         _migrate_user_scope(conn)
+        _migrate_requests(conn)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -144,6 +156,24 @@ def _migrate_user_scope(conn: sqlite3.Connection) -> None:
         conn.executescript(schema)
         conn.execute(copy_sql, (legacy_user,))
         conn.execute(f"DROP TABLE {old_table}")
+
+
+def _migrate_requests(conn: sqlite3.Connection) -> None:
+    """Seed the per-user request ledger from the older `submitted` table.
+
+    `submitted` keys on the ASIN alone with a single attribution column, so it
+    is last-writer-wins and cannot answer "how many did this account ask for
+    today". `requests` replaces it. The old table is left in place, unread, as
+    the rollback: nothing else in this app writes it any more.
+    """
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key='requests_migrated'").fetchone()
+    if row is not None:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO requests(user_key,asin,title,requested_at) "
+        "SELECT user_key,asin,title,submitted_at FROM submitted")
+    conn.execute("INSERT INTO meta(key,value) VALUES('requests_migrated','1')")
 
 
 def _sims_key(asin: str, axis: str) -> str:
@@ -213,12 +243,51 @@ def put_vectors(kind: str, vectors: dict) -> None:
         )
 
 
-def mark_submitted(asin: str, title: str, user_key: str) -> None:
+def record_request(user_key: str, asin: str, title: str) -> bool:
+    """Log that this account asked for a book. True when it is a new request.
+
+    Idempotent on purpose: a second tap on the same book must not restart the
+    "still looking" clock or spend another day's allowance.
+    """
     with db() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO submitted(asin,title,user_key,submitted_at) "
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO requests(user_key,asin,title,requested_at) "
             "VALUES(?,?,?,?)",
-            (asin, title, user_key, time.time()),
+            (user_key, asin, title, time.time()),
+        )
+    return cur.rowcount > 0
+
+
+def requests_for(user_key: str) -> list[dict]:
+    """Every book this account has asked for, newest first."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT asin,title,requested_at,fulfilled_at FROM requests "
+            "WHERE user_key=? ORDER BY requested_at DESC",
+            (user_key,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def requests_since(user_key: str, cutoff: float) -> int:
+    """How many requests this account has made since `cutoff`. Drives the cap."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM requests WHERE user_key=? AND requested_at>?",
+            (user_key, cutoff),
+        ).fetchone()
+    return int(row["n"])
+
+
+def fulfil_requests(user_key: str, asins: set) -> None:
+    """Stop the clock on requests whose book has since reached the library."""
+    if not asins:
+        return
+    with db() as conn:
+        conn.executemany(
+            "UPDATE requests SET fulfilled_at=? "
+            "WHERE user_key=? AND asin=? AND fulfilled_at IS NULL",
+            [(time.time(), user_key, a) for a in asins],
         )
 
 
@@ -231,10 +300,15 @@ def dismiss(user_key: str, asin: str) -> None:
 
 
 def suppressed_asins(user_key: str) -> set:
-    """Global acquisitions plus books dismissed by this user."""
+    """Global acquisitions plus books dismissed by this user.
+
+    Requests are suppressed for everyone, not just the person who made them:
+    Listenarr is shared, so a book one listener asks for is acquired once and
+    should not still be offered to the other nine as if it were unowned.
+    """
     with db() as conn:
         rows = conn.execute(
-            "SELECT asin FROM submitted UNION SELECT asin FROM dismissed WHERE user_key=?",
+            "SELECT asin FROM requests UNION SELECT asin FROM dismissed WHERE user_key=?",
             (user_key,),
         ).fetchall()
     return {r["asin"] for r in rows}

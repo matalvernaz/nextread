@@ -88,3 +88,39 @@ IGNORED_RATING_ITEM_IDS = frozenset(
 KEYWORD_PULL_ENABLED = os.environ.get("KEYWORD_PULL_ENABLED", "false").lower() == "true"
 KEYWORD_QUERIES_MAX = int(os.environ.get("KEYWORD_QUERIES_MAX", "4"))
 KEYWORD_SHELF_SHARE = float(os.environ.get("KEYWORD_SHELF_SHARE", "0.25"))
+
+
+# --- Requests: acquiring a book somebody asked for ---------------------------
+
+# The JSON API's shape version. A client reads it and refuses a shape it does
+# not know rather than guessing at missing fields.
+API_VERSION = 1
+
+# How many books a non-keyholder may request per rolling day.
+#
+# This app used to be keyholder-only, and every acquisition then waited up to
+# six hours for Listenarr's sweep. Opening requests to every account and
+# searching immediately removes both of those brakes at once, so this is the
+# one that replaces them: high enough that a listener never meets it in normal
+# use, low enough that ten accounts cannot fill the disk in an evening.
+# Jellyfin administrators are not capped.
+WANT_DAILY_CAP = int(os.environ.get("WANT_DAILY_CAP", "3"))
+
+# How long a request reads as "on its way" before it reads "still looking".
+#
+# There is no state that distinguishes "still searching" from "found nothing":
+# a throttled indexer returns zero results silently rather than erroring, and
+# the sweep keeps retrying a monitored book indefinitely. Two sweep cycles is
+# long enough that a normal acquisition never trips this, and short enough that
+# a book no indexer carries stops claiming to be arriving.
+STILL_LOOKING_AFTER_HOURS = int(os.environ.get("STILL_LOOKING_AFTER_HOURS", "12"))
+
+# How long an introspected Jellyfin access token stays trusted.
+#
+# Without it every API request costs a round trip to Jellyfin. Kept short
+# because expiry is the only thing that makes a revoked token stop working.
+TOKEN_CACHE_SECONDS = int(os.environ.get("TOKEN_CACHE_SECONDS", "60"))
+
+# Log verbosity. INFO narrates every request and every acquisition step; DEBUG
+# adds the per-candidate scoring detail, which is far too noisy to leave on.
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
