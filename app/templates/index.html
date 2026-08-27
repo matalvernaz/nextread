@@ -7,11 +7,11 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <a class="skip" href="#own">Skip to recommendations</a>
+  <a class="skip" href="#own">Skip to your shelf</a>
 
   <header>
     <h1>Nextread</h1>
-    <p class="viewer">Recommendations for <strong>{{ user_name }}</strong>.</p>
+    <p class="viewer">Discover, for <strong>{{ user_name }}</strong>.</p>
     <p>Built from {{ seeds }} book{{ '' if seeds == 1 else 's' }} you've listened to, out of {{ library }} in the library.</p>
     <p class="meta">{{ ratings }} of your rating{{ '' if ratings == 1 else 's' }} detected{% if ratings < rating_floor %}; rating-based tuning begins at {{ rating_floor }}{% endif %}.</p>
   </header>
@@ -23,8 +23,16 @@
     {% if err %}<p class="err">{{ err }}</p>{% endif %}
   </div>
 
+  <!-- Search first: somebody arriving with a title in mind should not have to
+       walk past two shelves to type it. -->
+  <form method="get" action="/search" role="search">
+    <label for="q">Search for a book</label>
+    <input type="search" id="q" name="q" autocomplete="off">
+    <button type="submit">Search</button>
+  </form>
+
   <form method="post" action="/refresh">
-    <button type="submit">Refresh recommendations</button>
+    <button type="submit">Refresh suggestions</button>
   </form>
 
   <main>

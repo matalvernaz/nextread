@@ -37,6 +37,14 @@ PLAYLIST_NAME = os.environ.get("PLAYLIST_NAME", "Next Read")
 # is unauthenticated and must not be hit on page load.
 SIMS_TTL_HOURS = int(os.environ.get("SIMS_TTL_HOURS", "168"))
 
+# A blurb and a runtime, which change about as often as a book gets re-issued.
+# Shorter than the sims TTL only because it is cheap to refetch one product.
+PRODUCT_TTL_HOURS = int(os.environ.get("PRODUCT_TTL_HOURS", "720"))
+
+# How many search hits to ask Listenarr for. Its own cap applies too; this is
+# what a person can stand to hear read out in one list.
+SEARCH_LIMIT = int(os.environ.get("SEARCH_LIMIT", "25"))
+
 # Audible caps sims responses; ask for a useful spread per seed.
 SIMS_PER_SEED = int(os.environ.get("SIMS_PER_SEED", "10"))
 

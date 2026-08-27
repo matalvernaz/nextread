@@ -35,6 +35,40 @@ assert 'aria-label="Summary of Example &amp; Book"' in html
 assert "A useful summary &amp; ending." in html
 assert "<strong>useful</strong>" not in html
 assert "A Source Book" in html
-assert "Recommendations for <strong>alex</strong>." in html
+assert "Discover, for <strong>alex</strong>." in html
 assert "0 of your ratings detected; rating-based tuning begins at 5." in html
+# The way in to search has to be on the page somebody lands on, above both
+# shelves: arriving with a title in mind should not mean walking past forty
+# suggestions to type it.
+assert 'action="/search"' in html
+assert 'role="search"' in html
+assert html.index('action="/search"') < html.index('id="own"')
+
+search_html = environment.get_template("search.html").render(
+    user_name="alex",
+    query="boba",
+    results=[
+        {"asin": "A1", "title": "Owned & Here", "authors": ["A. Writer"],
+         "narrators": [], "runtimeMinutes": 61, "owned": True, "requested": False},
+        {"asin": "A2", "title": "Not Here Yet", "authors": [], "narrators": [],
+         "runtimeMinutes": None, "owned": False, "requested": True},
+    ],
+    msg="",
+    err="",
+)
+assert "2 results for “boba”" in search_html
+# Owned is stated and offers no Want button: asking for a book already on the
+# shelf spends the daily allowance on nothing.
+assert "Already in your library." in search_html
+assert "Want it — Owned &amp; Here" not in search_html
+assert "Want it — Not Here Yet" in search_html
+assert "You have already asked for this one." in search_html
+# The blurb is fetched on open, so the row must not carry one.
+assert 'data-asin="A1"' in search_html
+assert "/summary?asin=" in search_html
+# A search with no query explains itself rather than showing an empty list.
+empty = environment.get_template("search.html").render(
+    user_name="alex", query="", results=[], msg="", err="")
+assert "Type a title or an author above." in empty
+
 print("template checks passed")

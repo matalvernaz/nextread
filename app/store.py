@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS audible_aliases (
     audible_asin TEXT NOT NULL,
     resolved_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS products (
+    asin        TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL,
+    fetched_at  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS doc_vectors (
     item_id     TEXT PRIMARY KEY,
     kind        TEXT NOT NULL,
@@ -115,6 +120,7 @@ def init() -> None:
             # would go on standing in for the real thing for the whole 168-hour
             # TTL, so the region change would look like it had done nothing.
             conn.execute("DROP TABLE IF EXISTS audible_aliases")
+            conn.execute("DROP TABLE IF EXISTS products")
             conn.execute(
                 "INSERT INTO meta(key,value) VALUES('sims_schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -187,6 +193,32 @@ def _sims_key(asin: str, axis: str) -> str:
     """Cache key. The axis is part of it: one ASIN has a different neighbour set
     per `similarity_type`, and keying on the ASIN alone collides across axes."""
     return f"{asin}:{axis}"
+
+
+def get_product(asin: str):
+    """One cached Audible product, or None if absent or stale.
+
+    `_candidate_description` has always described this lookup as cached and it
+    was not, which cost one live request per blurb. It matters more now that a
+    summary can be opened on demand: without this, reading the same book's
+    description twice asks Audible twice.
+    """
+    cutoff = time.time() - config.PRODUCT_TTL_HOURS * 3600
+    with db() as conn:
+        row = conn.execute(
+            "SELECT payload FROM products WHERE asin=? AND fetched_at>?",
+            (asin, cutoff),
+        ).fetchone()
+    return json.loads(row["payload"]) if row else None
+
+
+def put_product(asin: str, payload) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO products(asin,payload,fetched_at) VALUES(?,?,?) "
+            "ON CONFLICT(asin) DO UPDATE SET payload=excluded.payload, "
+            "fetched_at=excluded.fetched_at",
+            (asin, json.dumps(payload), time.time()))
 
 
 def get_sims(asin: str, axis: str):

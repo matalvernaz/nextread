@@ -26,6 +26,30 @@ CACHE_TTL_SECONDS = 3600
 _cache: dict[str, tuple[float, dict, bool]] = {}
 
 
+# Search must not pay for a shelf. A cold shelf build is 14.6 seconds over this
+# library and calls Audible; this is one Jellyfin listing, and it answers the
+# only question search asks of the library -- "do we already have this".
+OWNED_TTL_SECONDS = 900
+_owned_cache: dict[str, tuple[float, tuple[set, dict]]] = {}
+
+
+def owned_index(user: jellyfin.User) -> tuple[set, dict]:
+    """ASINs owned, and normalised-title -> author-set, for one account.
+
+    Cached separately from the shelves, and briefly: a book bought since the
+    last search should stop being offered without waiting an hour for the
+    shelf's own entry to age out.
+    """
+    with _cache_guard:
+        entry = _owned_cache.get(user.key)
+        if entry and time.monotonic() - entry[0] <= OWNED_TTL_SECONDS:
+            return entry[1]
+    index = engine._owned_index(jellyfin.books(jellyfin.user_id(user.name)))
+    with _cache_guard:
+        _owned_cache[user.key] = (time.monotonic(), index)
+    return index
+
+
 def _lock_for(user_key: str) -> Lock:
     with _cache_guard:
         return _cache_locks.setdefault(user_key, Lock())

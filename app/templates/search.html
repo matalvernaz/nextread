@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Search — Nextread</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a class="skip" href="#results">Skip to results</a>
+
+  <header>
+    <h1>Search</h1>
+    <p class="viewer">Looking for <strong>{{ user_name }}</strong>.</p>
+    <p><a href="/">Back to Discover</a></p>
+  </header>
+
+  <div id="status" role="status" aria-live="polite">
+    {% if msg %}<p class="ok">{{ msg }}</p>{% endif %}
+    {% if err %}<p class="err">{{ err }}</p>{% endif %}
+  </div>
+
+  <form method="get" action="/search" role="search">
+    <label for="q">Search for a book</label>
+    <input type="search" id="q" name="q" value="{{ query }}" autocomplete="off">
+    <button type="submit">Search</button>
+  </form>
+
+  <main>
+    <h2 id="results">
+      {%- if query -%}
+        {{ results | length }} result{{ '' if results | length == 1 else 's' }} for “{{ query }}”
+      {%- else -%}
+        Results
+      {%- endif -%}
+    </h2>
+
+    {% if not query %}
+    <p>Type a title or an author above. Books already in the library are shown
+      and marked, so a search can tell you that you already have one.</p>
+    {% elif not results %}
+    <p>Nothing found for that. Audible's catalogue is what is being searched, so
+      a book it does not sell will not appear however it is spelled.</p>
+    {% else %}
+    <ol class="shelf">
+      {% for b in results %}
+      <li>
+        <h3>{{ b.title }}</h3>
+        {% if b.authors %}<p class="by">by {{ b.authors | join(', ') }}</p>{% endif %}
+        {% if b.narrators %}<p class="by">narrated by {{ b.narrators | join(', ') }}</p>{% endif %}
+        {% if b.runtimeMinutes %}<p class="meta">{{ (b.runtimeMinutes // 60) }}h {{ (b.runtimeMinutes % 60) }}m</p>{% endif %}
+
+        {% if b.owned %}
+        <p class="meta">Already in your library.</p>
+        {% elif b.requested %}
+        <p class="meta">You have already asked for this one. It stays on the list.</p>
+        {% endif %}
+
+        <!-- Fetched on open, not with the row: a blurb is one Audible request
+             per book and a page of results would pay for all of them. -->
+        <details class="summary">
+          <summary aria-label="Summary of {{ b.title }}">Summary</summary>
+          <p class="summary-body" data-asin="{{ b.asin }}">Loading…</p>
+        </details>
+
+        {% if not b.owned %}
+        <div class="actions">
+          <form method="post" action="/want">
+            <input type="hidden" name="asin" value="{{ b.asin }}">
+            <input type="hidden" name="title" value="{{ b.title }}">
+            <button type="submit">Want it — {{ b.title }}</button>
+          </form>
+        </div>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+  </main>
+
+  <script>
+    // One fetch per summary, the first time it is opened, and the result is
+    // left in place. Written without a framework because the rest of this page
+    // is server-rendered and a screen reader reads the expanded text either way.
+    document.querySelectorAll('details.summary').forEach(function (details) {
+      details.addEventListener('toggle', function () {
+        var body = details.querySelector('.summary-body');
+        if (!details.open || !body || body.dataset.loaded) { return; }
+        body.dataset.loaded = '1';
+        fetch('/summary?asin=' + encodeURIComponent(body.dataset.asin))
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            body.textContent = (d && d.summary)
+              ? d.summary
+              : 'No summary published for this one.';
+          })
+          .catch(function () {
+            body.dataset.loaded = '';
+            body.textContent = 'Could not load the summary. Try opening it again.';
+          });
+      });
+    });
+  </script>
+</body>
+</html>

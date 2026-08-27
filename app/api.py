@@ -18,7 +18,7 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
-from . import config, jellyfin, logs, shelves, wants
+from . import config, jellyfin, logs, search, shelves, wants
 
 log = logs.get("api")
 
@@ -94,6 +94,11 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
             "remainingToday": remaining,
         },
         "states": [wants.ON_ITS_WAY, wants.STILL_LOOKING, wants.IN_LIBRARY],
+        # Named blocks rather than a version bump: a client that predates either
+        # route asks for neither, and one that postdates a server without them
+        # hides its own control instead of failing a tap.
+        "search": {"supported": True, "limit": config.SEARCH_LIMIT},
+        "summary": {"supported": True},
     }
 
 
@@ -116,6 +121,36 @@ def get_shelves(user: jellyfin.User = Depends(caller)) -> dict:
         "suggestions": [_suggestion(row) for row in data["discover"]],
         "requests": wants.states(user.key, data["owned_asins"]),
     }
+
+
+@router.get("/search")
+def get_search(q: str = "", user: jellyfin.User = Depends(caller)) -> dict:
+    """Catalogue hits for a title the listener already has in mind.
+
+    Owned books are marked, not dropped: on the shelf an owned book is noise,
+    but to somebody typing its title it is the answer.
+    """
+    return {
+        "version": config.API_VERSION,
+        "query": q.strip(),
+        "results": search.search(user, q),
+    }
+
+
+@router.get("/summary")
+def get_summary(asin: str, user: jellyfin.User = Depends(caller)) -> dict:
+    """One book's blurb, for a book that is not in the library to describe it.
+
+    Its own request rather than a field on every row: a blurb is one Audible
+    call per book, and a shelf or a search would pay for twenty-five of them to
+    show text nobody has opened.
+    """
+    found = search.summary(asin)
+    if not found["summary"]:
+        # Not a 404: the book exists, the blurb does not, and a client that
+        # cannot tell those apart shows the wrong message.
+        log.info("summary empty asin=%s", asin)
+    return {"version": config.API_VERSION, **found}
 
 
 @router.post("/want")

@@ -97,12 +97,24 @@ def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
 
 
 def product(asin: str) -> dict | None:
-    """Full-ish metadata for one ASIN, used when handing a pick to Listenarr."""
+    """Full-ish metadata for one ASIN, used when handing a pick to Listenarr.
+
+    Cached, because a summary can now be opened on demand and the same book
+    read twice must not cost two requests. A miss is not cached: an absent
+    product is what a wrong-marketplace lookup returns, and remembering that
+    for a month would outlive the mistake.
+    """
+    cached = store.get_product(asin)
+    if cached is not None:
+        return cached
     params = {"response_groups": "contributors,product_attrs,product_desc,media"}
     try:
         with httpx.Client(timeout=_TIMEOUT) as c:
             resp = c.get(f"{_base()}/products/{asin}", params=params)
             resp.raise_for_status()
-            return resp.json().get("product")
+            found = resp.json().get("product")
     except (httpx.HTTPError, ValueError):
         return None
+    if found:
+        store.put_product(asin, found)
+    return found
