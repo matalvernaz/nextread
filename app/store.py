@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS audible_aliases (
     audible_asin TEXT NOT NULL,
     resolved_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS shelves (
+    user_key    TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL,
+    computed_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS products (
     asin        TEXT PRIMARY KEY,
     payload     TEXT NOT NULL,
@@ -193,6 +198,46 @@ def _sims_key(asin: str, axis: str) -> str:
     """Cache key. The axis is part of it: one ASIN has a different neighbour set
     per `similarity_type`, and keying on the ASIN alone collides across axes."""
     return f"{asin}:{axis}"
+
+
+def get_shelf(user_key: str) -> tuple[dict, float] | None:
+    """The last shelf computed for this account, and when, or None.
+
+    Kept because the in-memory cache dies with the process and rebuilding costs
+    twelve seconds, nine of which is one Jellyfin listing. A restart used to
+    hand that bill to whoever opened the screen next.
+    """
+    with db() as conn:
+        row = conn.execute(
+            "SELECT payload, computed_at FROM shelves WHERE user_key=?",
+            (user_key,)).fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row["payload"])
+    except ValueError:
+        return None
+    # Sets do not survive JSON, and this one is membership-tested per request.
+    data["owned_asins"] = set(data.get("owned_asins") or [])
+    return data, row["computed_at"]
+
+
+def put_shelf(user_key: str, data: dict) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO shelves(user_key,payload,computed_at) VALUES(?,?,?) "
+            "ON CONFLICT(user_key) DO UPDATE SET payload=excluded.payload, "
+            "computed_at=excluded.computed_at",
+            (user_key, json.dumps(data, default=list), time.time()))
+
+
+def forget_shelf(user_key: str | None = None) -> None:
+    """Drop the persisted shelf, so an invalidation is not undone from disk."""
+    with db() as conn:
+        if user_key is None:
+            conn.execute("DELETE FROM shelves")
+        else:
+            conn.execute("DELETE FROM shelves WHERE user_key=?", (user_key,))
 
 
 def get_product(asin: str):

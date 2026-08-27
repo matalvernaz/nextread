@@ -5,9 +5,9 @@ HTML pages and the JSON API -- and they must share one cache, one lock per
 user, and one answer to who owes the playlist a write.
 """
 import time
-from threading import Lock
+from threading import Lock, Thread
 
-from . import engine, jellyfin, logs
+from . import engine, jellyfin, logs, store
 
 log = logs.get("shelves")
 
@@ -63,6 +63,57 @@ def _fresh_entry(user_key: str) -> tuple[dict, bool] | None:
     return None
 
 
+# In flight, so a slow rebuild started by one request is not started again by
+# the four that arrive while it runs.
+_refreshing: set[str] = set()
+
+
+def _stale_entry(user_key: str) -> dict | None:
+    """The last shelf for this account however old, memory first then disk."""
+    with _cache_guard:
+        entry = _cache.get(user_key)
+    if entry:
+        return entry[1]
+    try:
+        stored = store.get_shelf(user_key)
+    except Exception as exc:  # noqa: BLE001 - a cache that cannot be read is a
+        # cache miss, not a failed request. Computing is slow, never wrong.
+        log.warning("could not read the persisted shelf user=%s: %s", user_key, exc)
+        return None
+    if stored is None:
+        return None
+    data, computed_at = stored
+    with _cache_guard:
+        # Seeded as already stale: `time.monotonic()` and a wall clock cannot be
+        # compared, so an age measured across a restart is not knowable. Treating
+        # it as due for a refresh is the honest reading, and the refresh happens
+        # behind the answer rather than in front of it.
+        _cache[user_key] = (float("-inf"), data, False)
+    log.info("shelves restored from disk user=%s age=%.0fs",
+             user_key, max(0.0, time.time() - computed_at))
+    return data
+
+
+def _refresh_behind(user: jellyfin.User, update_playlist: bool) -> None:
+    """Recompute out of band, so the stale answer served just now goes stale less."""
+    with _cache_guard:
+        if user.key in _refreshing:
+            return
+        _refreshing.add(user.key)
+
+    def run() -> None:
+        try:
+            result(user, force=True, update_playlist=update_playlist)
+        except Exception as exc:  # noqa: BLE001 - a background refresh must never
+            # take the process down, and the stale answer is still being served.
+            log.warning("background shelf refresh failed user=%s: %s", user.key, exc)
+        finally:
+            with _cache_guard:
+                _refreshing.discard(user.key)
+
+    Thread(target=run, name=f"shelf-refresh-{user.key}", daemon=True).start()
+
+
 def result(user: jellyfin.User, force: bool = False,
             update_playlist: bool = True) -> dict:
     """This user's shelves, computing them only when the cache cannot answer.
@@ -70,6 +121,13 @@ def result(user: jellyfin.User, force: bool = False,
     `update_playlist=False` is the API's read: it must not have side effects on
     a GET. A cached entry computed that way still owes the playlist its write,
     so a later web request pays it from the cached ids rather than recomputing.
+
+    A stale entry is served immediately and refreshed behind the answer. The
+    rebuild costs twelve seconds -- nine of them one Jellyfin listing of 3,352
+    books, which is that slow because it asks for `People` and cannot stop:
+    414 books here carry an Author person and no AlbumArtist. Waiting for that
+    in front of the screen is the thing being fixed; an hour-old shelf is not
+    worth a twelve-second wait, and this one only ever happens once per account.
     """
     if not force and (cached := _fresh_entry(user.key)) is not None:
         data, written = cached
@@ -77,6 +135,12 @@ def result(user: jellyfin.User, force: bool = False,
         if update_playlist and not written:
             write_playlist(user, data)
         return data
+    if not force and (stale := _stale_entry(user.key)) is not None:
+        log.info("shelves serving a stale answer while it rebuilds user=%s", user.key)
+        _refresh_behind(user, update_playlist)
+        if update_playlist:
+            write_playlist(user, stale)
+        return stale
     with _lock_for(user.key):
         if not force and (cached := _fresh_entry(user.key)) is not None:
             data, written = cached
@@ -89,6 +153,12 @@ def result(user: jellyfin.User, force: bool = False,
         data = engine.run(user, update_playlist=update_playlist)
         with _cache_guard:
             _cache[user.key] = (time.monotonic(), data, update_playlist)
+        # Written after the memory cache, so a failure to persist costs the next
+        # restart and nothing else.
+        try:
+            store.put_shelf(user.key, data)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not persist shelf user=%s: %s", user.key, exc)
         log.info("shelves computed user=%s own=%d unowned=%d in %.1fs",
                  user.key, len(data.get("own") or []),
                  len(data.get("discover") or []), time.monotonic() - started)
@@ -110,11 +180,21 @@ def write_playlist(user: jellyfin.User, data: dict) -> None:
 
 
 def invalidate(user_key: str | None = None) -> None:
+    """Forget a shelf in memory AND on disk.
+
+    Both, or the stale-answer path would read back from disk the very thing
+    that was just invalidated: a dismissed book would reappear on the next
+    load and stay until a background rebuild happened to finish.
+    """
     with _cache_guard:
         if user_key is None:
             _cache.clear()
         else:
             _cache.pop(user_key, None)
+    try:
+        store.forget_shelf(user_key)
+    except Exception as exc:  # noqa: BLE001 - the memory cache is already clear
+        log.warning("could not forget the persisted shelf user=%s: %s", user_key, exc)
 
 
 def forget_asin(asin: str) -> None:
@@ -135,4 +215,14 @@ def forget_asin(asin: str) -> None:
             if len(kept) != len(discover):
                 _cache[key] = (at, {**data, "discover": kept}, written)
                 dropped.append(key)
+    # And on disk, for the same reason: a restart in between would otherwise
+    # offer the book again to everyone it was just withdrawn from.
+    for key in dropped:
+        with _cache_guard:
+            entry = _cache.get(key)
+        if entry:
+            try:
+                store.put_shelf(key, entry[1])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not persist the trimmed shelf user=%s: %s", key, exc)
     log.info("asin=%s removed from %d cached shelves %s", asin, len(dropped), dropped)
