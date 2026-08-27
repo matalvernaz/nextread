@@ -10,7 +10,12 @@ JELLYFIN_TOKEN = os.environ["JELLYFIN_TOKEN"]
 # state during the multi-user database migration.
 AUTH_USER_HEADER = os.environ.get(
     "AUTH_USER_HEADER", "X-Auth-Request-Preferred-Username")
-JELLYFIN_USER = os.environ.get("JELLYFIN_USER", "matt")
+# Empty by default, and deliberately not a name. This is the identity assumed
+# when the forward-auth header is absent, and a default that names somebody
+# means a fresh install elsewhere quietly tries to resolve a person who does
+# not exist there. Unset, the pages refuse instead of guessing, which is also
+# the safer reading of a missing header.
+JELLYFIN_USER = os.environ.get("JELLYFIN_USER", "").strip()
 
 # Comma-separated Jellyfin library (view) ids to treat as audiobook sources.
 LIBRARY_IDS = [x.strip() for x in os.environ.get("LIBRARY_IDS", "").split(",") if x.strip()]

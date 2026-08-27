@@ -27,7 +27,25 @@ real_user = main.jellyfin.user
 main.jellyfin.user = lambda name: users[name.casefold()]
 try:
     assert main._viewer(request("ALEX")) == alex
+
+    # An install that sets a fallback gets one: this is how direct access
+    # without a proxy works, and it is what this deployment configures.
+    main.config.JELLYFIN_USER = "matt"
     assert main._viewer(request()) == matt
+
+    # One that does not must refuse rather than guess. The default is empty on
+    # purpose -- a default that names somebody would have a fresh install
+    # elsewhere silently resolving a person who does not exist there, and
+    # serving one account's shelf to whoever asked.
+    main.config.JELLYFIN_USER = ""
+    try:
+        main._viewer(request())
+    except HTTPException as exc:
+        assert exc.status_code == 403, exc.status_code
+    else:
+        raise AssertionError("no header and no fallback must be refused")
+    main.config.JELLYFIN_USER = "matt"
+
     try:
         main._viewer(request("missing"))
     except HTTPException as exc:
