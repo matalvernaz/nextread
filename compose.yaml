@@ -1,6 +1,16 @@
 services:
   nextread:
-    image: nextread:local
+    # The published image, and the source it is built from. Both, deliberately:
+    # `docker compose up -d --build` builds locally and tags it with this name,
+    # so this host runs the same image everybody else pulls rather than a
+    # private variant nobody would notice breaking. `docker compose pull` gets
+    # the published one instead, once the package is public.
+    #
+    # Built for linux/amd64 and linux/arm64. This host is aarch64 and GitHub's
+    # runners are not, so a single-arch image would push green and then refuse
+    # to start here.
+    image: ghcr.io/matalvernaz/nextread:latest
+    build: .
     container_name: nextread
     restart: unless-stopped
     environment:
