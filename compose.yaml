@@ -18,6 +18,10 @@ services:
       LISTENARR_URL: "http://listenarr:4545"
       LISTENARR_QUALITY_PROFILE_ID: "1"
       PLAYLIST_NAME: "Next Read"
+      # Non-keyholders only; Jellyfin administrators are uncapped.
+      WANT_DAILY_CAP: "3"
+      STILL_LOOKING_AFTER_HOURS: "12"
+      LOG_LEVEL: "INFO"
       DB_PATH: "/data/nextread.db"
       TZ: "America/Vancouver"
     volumes:
@@ -34,11 +38,24 @@ services:
       - "traefik.http.routers.nextread.rule=Host(`nextread.thealvernaz.space`) || Host(`www.nextread.thealvernaz.space`)"
       - traefik.http.routers.nextread.entrypoints=websecure
       - traefik.http.routers.nextread.middlewares=www-to-nonwww@file,access-nextread@file
+      # Pinned low so the bypass routers below outrank it. Traefik v3 derives
+      # priority from rule LENGTH when it is not set, so adding a Host() clause
+      # here would otherwise silently swallow their paths.
+      - traefik.http.routers.nextread.priority=10
       - traefik.http.routers.nextread.tls=true
       - traefik.http.routers.nextread.tls.certresolver=le-dns
       - traefik.http.routers.nextread.tls.domains[0].main=nextread.thealvernaz.space
       - traefik.http.routers.nextread.tls.domains[0].sans=www.nextread.thealvernaz.space
       - traefik.http.services.nextread.loadbalancer.server.port=8080
+      # The JSON API authenticates callers itself, by introspecting the Jellyfin
+      # access token they send. It has to bypass SSO because a native app cannot
+      # complete an oauth2-proxy browser flow. /, /want and /dismiss keep theirs.
+      - "traefik.http.routers.nextread-api.rule=Host(`nextread.thealvernaz.space`) && PathPrefix(`/api/`)"
+      - traefik.http.routers.nextread-api.entrypoints=websecure
+      - traefik.http.routers.nextread-api.tls=true
+      - traefik.http.routers.nextread-api.tls.certresolver=le-dns
+      - traefik.http.routers.nextread-api.service=nextread
+      - traefik.http.routers.nextread-api.priority=100
       - "traefik.http.routers.nextread-public.rule=Host(`nextread.thealvernaz.space`) && PathPrefix(`/favicon`)"
       - traefik.http.routers.nextread-public.entrypoints=websecure
       - traefik.http.routers.nextread-public.tls=true
