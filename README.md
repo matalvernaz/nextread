@@ -175,9 +175,12 @@ All configuration comes from the environment; see `app/config.py`.
 - `JELLYFIN_TOKEN` is required and needs to list users, read their user data,
   and update playlists.
 - `AUTH_USER_HEADER` defaults to `X-Auth-Request-Preferred-Username`.
-- `JELLYFIN_USER` defaults to `matt`. It is the fallback for direct development,
-  the owner of migrated single-user state, and the only account whose playlist
-  keeps the unsuffixed `PLAYLIST_NAME`.
+- `JELLYFIN_USER` is empty by default and is the identity assumed when the
+  forward-auth header is absent. Unset, the HTML pages refuse rather than guess,
+  which is what you want behind a proxy that is supposed to set that header; set
+  it for direct access without one. It is also the owner of migrated
+  single-user state and the only account whose playlist keeps the unsuffixed
+  `PLAYLIST_NAME`.
 - `PLAYLIST_NAME` defaults to `Next Read`.
 - `LIBRARY_IDS` limits the audiobook libraries included in every user's model.
 - `WANT_DAILY_CAP` (default 3) bounds requests per non-keyholder per day.
@@ -191,6 +194,84 @@ All configuration comes from the environment; see `app/config.py`.
 The database migration is automatic and transactional. Existing submitted
 books, dismissals, and run history are assigned to `JELLYFIN_USER`; subsequent
 dismissals and runs are scoped to the authenticated account.
+
+## Serving it where clients find it themselves
+
+A client that already knows where Jellyfin is should not have to be told where
+this is. The convention, which EchoFin implements and any other client can:
+
+    https://<your-jellyfin-origin>/nextread/api/v1/...
+
+Serve **only** `/nextread/api` there, and strip the `/nextread` prefix before it
+reaches this app. Nothing changes in Jellyfin: no plugin, no setting, no
+restart. It is one rule in whatever already terminates TLS for Jellyfin.
+
+**Do not serve the HTML pages at that origin.** They take their identity from
+the forward-auth header, so they belong behind whatever authentication your
+Jellyfin host does *not* apply. The JSON API is safe there because it
+authenticates every request by introspecting the caller's own Jellyfin access
+token; it never consults `JELLYFIN_USER`.
+
+Traefik, as labels on this container:
+
+```yaml
+- "traefik.http.routers.nextread-jellyfin.rule=Host(`jellyfin.example.com`) && PathPrefix(`/nextread/api`)"
+- traefik.http.routers.nextread-jellyfin.entrypoints=websecure
+# Must outrank Jellyfin's own Host() router, whose rule is shorter.
+- traefik.http.routers.nextread-jellyfin.priority=200
+- traefik.http.routers.nextread-jellyfin.middlewares=nextread-strip
+- traefik.http.middlewares.nextread-strip.stripprefix.prefixes=/nextread
+- traefik.http.routers.nextread-jellyfin.service=nextread
+- traefik.http.routers.nextread-jellyfin.tls=true
+```
+
+nginx, in the Jellyfin server block:
+
+```nginx
+location /nextread/api/ {
+    proxy_pass http://nextread:8080/api/;
+    proxy_set_header Host $host;
+}
+```
+
+Caddy, in the Jellyfin site block:
+
+```
+handle_path /nextread/api/* {
+    reverse_proxy nextread:8080 {
+        rewrite /api{uri}
+    }
+}
+```
+
+### Checking it
+
+    curl -s -o /dev/null -w '%{http_code}\n' https://jellyfin.example.com/nextread/api/v1/capabilities
+
+**401 is the passing answer** — the request reached this app, the prefix came
+off, and it declined a caller with no token. A **404** means the rule did not
+take: the proxy is answering, not this. Two known ways to get one: a rule that
+does not outrank Jellyfin's own, and a Traefik docker provider that has not
+registered the container yet, which takes 25-30 seconds.
+
+Confirm you have not shadowed anything of Jellyfin's either:
+
+    curl -s -o /dev/null -w '%{http_code}\n' https://jellyfin.example.com/api/v1/capabilities   # expect 404
+
+### What a client should do
+
+1. Ask `<origin>/nextread/api/v1/capabilities` with the user's Jellyfin token
+   in an `Authorization: MediaBrowser Token="..."` header.
+2. Treat any failure as "not installed" and say nothing. Most servers do not
+   run this, and an error surface for an absent optional service is noise.
+3. Check `version` against what it understands, and `libraryIds` for the
+   library it is showing.
+4. Offer a manual address as an override, for a service that runs somewhere
+   its Jellyfin does not front.
+
+Deriving the address rather than storing one also keeps the traffic on
+whichever route the client is already using, so a client on the same LAN as the
+server does not leave the network to reach this.
 
 ## Deploy
 

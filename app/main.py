@@ -38,6 +38,14 @@ def _viewer(request: Request) -> jellyfin.User:
     """Resolve the forward-auth identity; never take identity from user input."""
     username = (request.headers.get(config.AUTH_USER_HEADER)
                 or config.JELLYFIN_USER).strip()
+    if not username:
+        # No header and no configured fallback. Guessing here would serve one
+        # account's shelf to whoever asked, which is exactly what the header is
+        # for. An install that wants direct access sets JELLYFIN_USER.
+        raise HTTPException(
+            status_code=403,
+            detail="No signed-in user. This service expects to sit behind "
+                   "authentication that sets a user header.")
     try:
         return jellyfin.user(username)
     except LookupError as exc:
