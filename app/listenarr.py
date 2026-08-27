@@ -75,7 +75,7 @@ def _to_add_metadata(result: dict) -> dict:
     return {
         "asin": result.get("asin"),
         "source": "Audible",
-        "region": "us",
+        "region": config.AUDIBLE_REGION,
         "title": result.get("title"),
         "authors": _names(result.get("authors")),
         "narrators": _names(result.get("narrators")),
@@ -133,7 +133,12 @@ def audible_search(query: str, limit: int = 25) -> list[dict]:
     """
     try:
         with _client() as c:
-            resp = c.get(f"{_API}/search/audible", params={"query": query})
+            # Region stated rather than left to Listenarr's own default. Its
+            # `DefaultSearchRegion` is a setting, so a reset of its database
+            # would put this search back on the US store without a word.
+            resp = c.get(
+                f"{_API}/search/audible",
+                params={"query": query, "region": config.AUDIBLE_REGION})
             resp.raise_for_status()
             results = (resp.json().get("results") or [])[:limit]
     except (httpx.HTTPError, ValueError) as exc:

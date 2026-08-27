@@ -15,6 +15,15 @@ JELLYFIN_USER = os.environ.get("JELLYFIN_USER", "matt")
 # Comma-separated Jellyfin library (view) ids to treat as audiobook sources.
 LIBRARY_IDS = [x.strip() for x in os.environ.get("LIBRARY_IDS", "").split(",") if x.strip()]
 
+# Which Audible marketplace this household buys from. `ca` here, not `us`:
+# measured 2026-08-27, `api.audible.com` answers 200 with an EMPTY product for
+# B0DCHQ9QT7 (Demon World Boba Shop) while `api.audible.ca` returns the real
+# record. This library is indie Audible-CA progression fantasy, so the US store
+# is missing or mis-spelling a large part of it, and every lookup, similarity
+# call and keyword search has to agree on the region or the shelf recommends
+# books that are already on disk.
+AUDIBLE_REGION = os.environ.get("AUDIBLE_REGION", "ca").strip().lower()
+
 LISTENARR_URL = os.environ.get("LISTENARR_URL", "http://listenarr:4545")
 LISTENARR_QUALITY_PROFILE_ID = int(os.environ.get("LISTENARR_QUALITY_PROFILE_ID", "1"))
 
