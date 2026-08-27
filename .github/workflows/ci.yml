@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Matching the Dockerfile. A suite that passes on a version the image
+          # does not run is not evidence about the image.
+          python-version: "3.12"
+      - run: pip install --no-cache-dir -r requirements.txt
+      - name: Run every test file
+        # Each file is a standalone script that exits non-zero on failure, not a
+        # pytest suite. Looping keeps one failure from hiding the rest, and the
+        # names are printed so a red run says which one without opening the log.
+        env:
+          JELLYFIN_TOKEN: ci-placeholder-token
+        run: |
+          set -u
+          status=0
+          for t in tests/*.py; do
+            if python3 "$t" > /tmp/out 2>&1; then
+              echo "PASS  $t"
+            else
+              status=1
+              echo "FAIL  $t"
+              sed 's/^/      /' /tmp/out
+            fi
+          done
+          exit "$status"

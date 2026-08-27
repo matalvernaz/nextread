@@ -1,6 +1,12 @@
 services:
   nextread:
     image: nextread:local
+    # Both, deliberately. `image` alone means `docker compose up` on a machine
+    # that has never built it fails on a tag nothing publishes, and
+    # `docker compose build` answers "No services to build" rather than saying
+    # so. With `build`, one command works from a clean clone; the tag stays
+    # because the deploy recipe and the watchtower opt-out both name it.
+    build: .
     container_name: nextread
     restart: unless-stopped
     environment:
