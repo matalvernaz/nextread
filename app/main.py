@@ -15,7 +15,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import api, config, jellyfin, logs, shelves, store, wants
+from . import api, config, jellyfin, logs, search, shelves, store, wants
 
 log = logs.get("main")
 
@@ -75,6 +75,44 @@ def index(request: Request, msg: str = "", err: str = ""):
             "requests": wants.states(user.key, data["owned_asins"]),
         },
     )
+
+
+@app.get("/search")
+def search_page(request: Request, q: str = "", msg: str = "", err: str = ""):
+    """Find a book by name, rather than waiting for the shelf to offer it.
+
+    Its own page rather than a section of the index: the index computes both
+    shelves, and a search should not wait 14.6 seconds behind a cold shelf
+    build to answer a title somebody already typed.
+    """
+    user = _viewer(request)
+    query = q.strip()
+    results = search.search(user, query) if query else []
+    return templates.TemplateResponse(
+        "search.html",
+        {
+            "request": request,
+            "user_name": user.name,
+            "query": query,
+            "results": results,
+            "msg": msg,
+            "err": err,
+        },
+    )
+
+
+@app.get("/summary")
+def summary_page(request: Request, asin: str):
+    """One blurb, as JSON, for the search page to fetch when it is opened.
+
+    Separate from `/api/summary` because the two are authenticated differently:
+    the API takes a Jellyfin access token, which a browser on this page does not
+    have, while this side is behind the forward-auth header. `_viewer` is called
+    for the same reason the rest of the page does -- not because a blurb is
+    private, but so this is not an open proxy to Audible.
+    """
+    _viewer(request)
+    return search.summary(asin)
 
 
 @app.post("/want")
