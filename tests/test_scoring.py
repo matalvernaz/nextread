@@ -4,7 +4,9 @@ Deliberately no live Jellyfin writes: a rating cannot be cleared through the API
 so every real test rating is permanent. The POST path is verified separately; what
 needs pinning here is that the arithmetic does what the comments claim.
 """
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import engine, textmodel
@@ -57,7 +59,7 @@ check_true("whereas the old hard switch moved it by 0.65",
            abs(1.0 - engine.NEUTRAL_WEIGHT) > 0.6)
 
 print("--- a rating we refuse to trust reads as unrated everywhere ---")
-bad_id = sorted(engine.config.IGNORED_RATING_ITEM_IDS)[0]
+bad_id = min(engine.config.IGNORED_RATING_ITEM_IDS)
 bad = item(bad_id, 1)
 check("its rating is not visible", engine._rating(bad), None)
 check("so it weighs as unrated, not as a 1",
@@ -89,6 +91,62 @@ check_true("that neutral is positive, so the unrated do not drop out",
 print("--- a rated book is a seed even with no play state ---")
 check("rated but unplayed is a seed", engine._is_seed(item("a", 8, played=False)), True)
 check("unrated and unplayed is not", engine._is_seed(item("b", None, played=False)), False)
+
+print("--- partial listens contribute in proportion to engagement ---")
+partial = item("partial", played=False)
+partial["UserData"]["PlayedPercentage"] = 25.0
+check("a quarter-listened book has quarter strength",
+      engine._engagement_weight(partial, 0.0), 0.25)
+finished = item("finished", played=True)
+check("a completed book has full strength",
+      engine._engagement_weight(finished, 0.0), 1.0)
+rated_unplayed = item("rated", 9, played=False)
+check("one early rating does not bypass the rating floor",
+      engine._engagement_weight(rated_unplayed, 0.0), 0.0)
+check("an explicit rating has full engagement once the ramp is active",
+      engine._engagement_weight(rated_unplayed, 1.0), 1.0)
+
+print("--- dead library ASINs resolve to the matching audio edition ---")
+seed = item("seed", name="Dark Lord of the Farmstead: Part 3")
+seed["People"] = [{"Type": "Author", "Name": "John Broadway"}]
+rows = [
+    {"asin": "part-four", "title": "Dark Lord of the Farmstead: Part 4",
+     "authors": [{"name": "John Broadway"}]},
+    {"asin": "part-three", "title": "Dark Lord of the Farmstead: Part 3",
+     "authors": [{"name": "John Broadway"}]},
+    {"asin": "wrong-author", "title": "Dark Lord of the Farmstead: Part 3",
+     "authors": [{"name": "Someone Else"}]},
+]
+check("the exact volume wins over a shared subtitle-stripped key",
+      engine._matching_audible_asin(seed, rows), "part-three")
+
+print("--- Audible votes carry the seed's weight ---")
+cand = {"asin": "candidate", "authors": [], "narrators": []}
+score, why = engine._score_candidate(
+    cand,
+    {"authors": {}, "narrators": {}},
+    {"candidate": 0.25},
+    0.0,
+    ["A Quarter-Listened Seed"],
+)
+check("a quarter-strength seed casts a quarter vote",
+      score, engine.W_SIMS_VOTE * 0.25)
+check_true("the reason names the actual source title",
+           "A Quarter-Listened Seed" in why[0], why[0])
+
+affinity_cand = {
+    "asin": "affinity", "authors": ["Partial Author"],
+    "narrators": ["Partial Narrator"],
+}
+affinity_score, _ = engine._score_candidate(
+    affinity_cand,
+    {"authors": {"Partial Author": 0.25},
+     "narrators": {"Partial Narrator": 0.5}},
+    {},
+    0.0,
+)
+check("author and narrator bonuses retain their affinity weights",
+      affinity_score, engine.W_AUTHOR * 0.25 + engine.W_NARRATOR * 0.5)
 
 print("--- disliked books must not lend their author any affinity ---")
 liked = item("liked", 9, name="Good One")

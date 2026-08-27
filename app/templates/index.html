@@ -11,7 +11,9 @@
 
   <header>
     <h1>Nextread</h1>
+    <p class="viewer">Recommendations for <strong>{{ user_name }}</strong>.</p>
     <p>Built from {{ seeds }} book{{ '' if seeds == 1 else 's' }} you've listened to, out of {{ library }} in the library.</p>
+    <p class="meta">{{ ratings }} of your rating{{ '' if ratings == 1 else 's' }} detected{% if ratings < rating_floor %}; rating-based tuning begins at {{ rating_floor }}{% endif %}.</p>
   </header>
 
   <!-- Status region is present on every load, empty when there is nothing to
@@ -64,6 +66,13 @@
         <ul class="why">
           {% for reason in b.why %}<li>{{ reason }}</li>{% endfor %}
         </ul>
+        {% endif %}
+        {% set summary = b.description | default('') | striptags | trim %}
+        {% if summary %}
+        <details class="summary">
+          <summary aria-label="Summary of {{ b.title }}">Summary</summary>
+          <p>{{ summary }}</p>
+        </details>
         {% endif %}
         <div class="actions">
           <form method="post" action="/want">

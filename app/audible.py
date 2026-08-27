@@ -1,8 +1,8 @@
 """Audible catalogue client -- the recommendation engine.
 
 `/1.0/catalog/products/{asin}/sims` returns Audible's own similar-products list
-and needs no key or account. Responses are cached in SQLite; this endpoint is
-never called on a page load.
+and needs no key or account. Responses are cached in SQLite; repeated page loads
+reuse the engine's in-memory result.
 """
 import httpx
 

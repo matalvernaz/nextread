@@ -5,6 +5,11 @@ import os
 # service as a catalogue -- see the project notes on why Listenarr is a queue.
 JELLYFIN_URL = os.environ.get("JELLYFIN_URL", "http://jellyfin:8096")
 JELLYFIN_TOKEN = os.environ["JELLYFIN_TOKEN"]
+# The trusted forward-auth proxy supplies this for normal web requests. The
+# fallback keeps direct/local operation possible and owns legacy single-user
+# state during the multi-user database migration.
+AUTH_USER_HEADER = os.environ.get(
+    "AUTH_USER_HEADER", "X-Auth-Request-Preferred-Username")
 JELLYFIN_USER = os.environ.get("JELLYFIN_USER", "matt")
 
 # Comma-separated Jellyfin library (view) ids to treat as audiobook sources.
@@ -48,7 +53,8 @@ MIN_RATINGS_FOR_SIGNED_MODE = int(os.environ.get("MIN_RATINGS_FOR_SIGNED_MODE", 
 # long it takes to reach full strength.
 RATINGS_RAMP_SPAN = int(os.environ.get("RATINGS_RAMP_SPAN", "15"))
 
-# Jellyfin item ids whose rating is known to be wrong and cannot be corrected.
+# Jellyfin item ids whose rating is known to be wrong for JELLYFIN_USER and
+# cannot be corrected. Other users' ratings on the same books remain valid.
 #
 # There is exactly one: a 1 written to "The Grief of Stones" while verifying the
 # write path, judging the file (a 0.2 MB ebook mislabelled as an 8-hour

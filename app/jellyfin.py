@@ -1,8 +1,10 @@
 """Jellyfin client. Jellyfin is the single library of record for Nextread.
 
-Auth note: this server (Matt's audiobook fork) REJECTS `?api_key=` with a 401.
+Auth note: this audiobook fork REJECTS `?api_key=` with a 401.
 Only the `Authorization: MediaBrowser Token="..."` header works.
 """
+from dataclasses import dataclass
+
 import httpx
 
 from . import config
@@ -22,19 +24,35 @@ _ITEM_FIELDS = (
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
+@dataclass(frozen=True, slots=True)
+class User:
+    id: str
+    name: str
+
+    @property
+    def key(self) -> str:
+        """Stable-enough local scope shared with the SSO username."""
+        return self.name.casefold()
+
+
 def _client() -> httpx.Client:
     return httpx.Client(base_url=config.JELLYFIN_URL, headers=_HEADERS, timeout=_TIMEOUT)
 
 
-def user_id(name: str | None = None) -> str:
-    """Resolve a username to its Jellyfin id. Names are readable; ids get pasted wrong."""
+def user(name: str | None = None) -> User:
+    """Resolve an SSO username to the matching Jellyfin account."""
     name = name or config.JELLYFIN_USER
     with _client() as c:
         users = c.get("/Users").raise_for_status().json()
     for u in users:
-        if u["Name"].lower() == name.lower():
-            return u["Id"]
+        if u["Name"].casefold() == name.casefold():
+            return User(id=u["Id"], name=u["Name"])
     raise LookupError(f"no Jellyfin user named {name!r}")
+
+
+def user_id(name: str | None = None) -> str:
+    """Compatibility helper for scripts that only need the Jellyfin id."""
+    return user(name).id
 
 
 def library_ids() -> list[str]:

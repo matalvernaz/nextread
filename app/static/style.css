@@ -6,6 +6,7 @@ body {
 .skip { position: absolute; left: -9999px; }
 .skip:focus { position: static; display: inline-block; padding: .5rem; }
 h1 { margin-bottom: .25rem; }
+.viewer { margin: 0 0 .75rem; }
 h2 { margin-top: 2.5rem; }
 h3 { margin: 0 0 .25rem; font-size: 1.05rem; }
 .shelf { padding-left: 1.5rem; }
@@ -13,6 +14,9 @@ h3 { margin: 0 0 .25rem; font-size: 1.05rem; }
 .by, .meta { margin: .1rem 0; }
 .meta { opacity: .8; }
 .why { margin: .4rem 0 .6rem; padding-left: 1.25rem; }
+.summary { margin: .4rem 0 .75rem; }
+.summary > summary { cursor: pointer; font-weight: 600; }
+.summary > p { margin: .4rem 0 0; }
 .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 button {
   font: inherit; padding: .5rem .9rem; cursor: pointer;

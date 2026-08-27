@@ -1,7 +1,7 @@
-"""SQLite cache. Holds only a derived taste model and a recommendations cache.
+"""SQLite caches plus the small amount of user-scoped UI state.
 
-Deliberately NOT a catalogue: no shelves, no reading state, no metadata of
-record. Jellyfin owns all of that. Delete this file and you lose a cache.
+Deliberately not a catalogue: Jellyfin remains authoritative for books, play
+state, ratings, and playlists. Dismissals and request/run history live here.
 """
 import json
 import sqlite3
@@ -15,6 +15,37 @@ from . import config
 # not being kept when it was written.
 SIMS_SCHEMA_VERSION = 2
 
+_SUBMITTED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS submitted (
+    asin         TEXT PRIMARY KEY,
+    title        TEXT,
+    user_key     TEXT NOT NULL,
+    submitted_at REAL NOT NULL
+);
+"""
+
+_DISMISSED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS dismissed (
+    user_key    TEXT NOT NULL,
+    asin        TEXT NOT NULL,
+    dismissed_at REAL NOT NULL,
+    PRIMARY KEY (user_key, asin)
+);
+"""
+
+_RUNS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_key    TEXT NOT NULL,
+    started_at  REAL NOT NULL,
+    finished_at REAL,
+    seeds       INTEGER,
+    owned       INTEGER,
+    unowned     INTEGER,
+    note        TEXT
+);
+"""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key         TEXT PRIMARY KEY,
@@ -25,31 +56,18 @@ CREATE TABLE IF NOT EXISTS sims (
     payload     TEXT NOT NULL,
     fetched_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audible_aliases (
+    source_asin  TEXT PRIMARY KEY,
+    audible_asin TEXT NOT NULL,
+    resolved_at  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS doc_vectors (
     item_id     TEXT PRIMARY KEY,
     kind        TEXT NOT NULL,
     payload     TEXT NOT NULL,
     built_at    REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS submitted (
-    asin        TEXT PRIMARY KEY,
-    title       TEXT,
-    submitted_at REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS dismissed (
-    asin        TEXT PRIMARY KEY,
-    dismissed_at REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS runs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at  REAL NOT NULL,
-    finished_at REAL,
-    seeds       INTEGER,
-    owned       INTEGER,
-    unowned     INTEGER,
-    note        TEXT
-);
-"""
+""" + _SUBMITTED_SCHEMA + _DISMISSED_SCHEMA + _RUNS_SCHEMA
 
 
 @contextmanager
@@ -84,6 +102,48 @@ def init() -> None:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SIMS_SCHEMA_VERSION),))
         conn.executescript(SCHEMA)
+        _migrate_user_scope(conn)
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate_user_scope(conn: sqlite3.Connection) -> None:
+    """Assign legacy single-user rows to the configured fallback user."""
+    legacy_user = config.JELLYFIN_USER.casefold()
+    migrations = (
+        (
+            "submitted", _SUBMITTED_SCHEMA,
+            (
+                "INSERT INTO submitted(asin,title,user_key,submitted_at) "
+                "SELECT asin,title,?,submitted_at FROM submitted_single_user"
+            ),
+        ),
+        (
+            "dismissed", _DISMISSED_SCHEMA,
+            (
+                "INSERT INTO dismissed(user_key,asin,dismissed_at) "
+                "SELECT ?,asin,dismissed_at FROM dismissed_single_user"
+            ),
+        ),
+        (
+            "runs", _RUNS_SCHEMA,
+            (
+                "INSERT INTO runs(id,user_key,started_at,finished_at,seeds,owned,unowned,note) "
+                "SELECT id,?,started_at,finished_at,seeds,owned,unowned,note "
+                "FROM runs_single_user"
+            ),
+        ),
+    )
+    for table, schema, copy_sql in migrations:
+        if "user_key" in _columns(conn, table):
+            continue
+        old_table = f"{table}_single_user"
+        conn.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
+        conn.executescript(schema)
+        conn.execute(copy_sql, (legacy_user,))
+        conn.execute(f"DROP TABLE {old_table}")
 
 
 def _sims_key(asin: str, axis: str) -> str:
@@ -112,6 +172,28 @@ def put_sims(asin: str, axis: str, payload) -> None:
         )
 
 
+def get_audible_alias(source_asin: str) -> str | None:
+    """A recently resolved audiobook ASIN for a dead library identifier."""
+    cutoff = time.time() - config.SIMS_TTL_HOURS * 3600
+    with db() as conn:
+        row = conn.execute(
+            "SELECT audible_asin FROM audible_aliases "
+            "WHERE source_asin=? AND resolved_at>?",
+            (source_asin, cutoff),
+        ).fetchone()
+    return row["audible_asin"] if row else None
+
+
+def put_audible_alias(source_asin: str, audible_asin: str) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO audible_aliases(source_asin,audible_asin,resolved_at) "
+            "VALUES(?,?,?) ON CONFLICT(source_asin) DO UPDATE SET "
+            "audible_asin=excluded.audible_asin,resolved_at=excluded.resolved_at",
+            (source_asin, audible_asin, time.time()),
+        )
+
+
 def get_vectors(kind: str) -> dict:
     """Cached sparse TF-IDF vectors, keyed by Jellyfin item id."""
     with db() as conn:
@@ -131,34 +213,39 @@ def put_vectors(kind: str, vectors: dict) -> None:
         )
 
 
-def mark_submitted(asin: str, title: str) -> None:
+def mark_submitted(asin: str, title: str, user_key: str) -> None:
     with db() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO submitted(asin,title,submitted_at) VALUES(?,?,?)",
-            (asin, title, time.time()),
+            "INSERT OR REPLACE INTO submitted(asin,title,user_key,submitted_at) "
+            "VALUES(?,?,?,?)",
+            (asin, title, user_key, time.time()),
         )
 
 
-def dismiss(asin: str) -> None:
+def dismiss(user_key: str, asin: str) -> None:
     with db() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO dismissed(asin,dismissed_at) VALUES(?,?)",
-            (asin, time.time()),
+            "INSERT OR REPLACE INTO dismissed(user_key,asin,dismissed_at) VALUES(?,?,?)",
+            (user_key, asin, time.time()),
         )
 
 
-def suppressed_asins() -> set:
-    """ASINs we should never show again: already handed to Listenarr, or dismissed."""
+def suppressed_asins(user_key: str) -> set:
+    """Global acquisitions plus books dismissed by this user."""
     with db() as conn:
         rows = conn.execute(
-            "SELECT asin FROM submitted UNION SELECT asin FROM dismissed"
+            "SELECT asin FROM submitted UNION SELECT asin FROM dismissed WHERE user_key=?",
+            (user_key,),
         ).fetchall()
     return {r["asin"] for r in rows}
 
 
-def start_run() -> int:
+def start_run(user_key: str) -> int:
     with db() as conn:
-        cur = conn.execute("INSERT INTO runs(started_at) VALUES(?)", (time.time(),))
+        cur = conn.execute(
+            "INSERT INTO runs(user_key,started_at) VALUES(?,?)",
+            (user_key, time.time()),
+        )
         return cur.lastrowid
 
 
@@ -170,8 +257,10 @@ def finish_run(run_id: int, seeds: int, owned: int, unowned: int, note: str = ""
         )
 
 
-def last_run():
+def last_run(user_key: str):
     with db() as conn:
         return conn.execute(
-            "SELECT * FROM runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM runs WHERE user_key=? AND finished_at IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (user_key,),
         ).fetchone()

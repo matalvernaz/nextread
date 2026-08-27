@@ -10,18 +10,18 @@ Two surfaces, deliberately different in kind:
   only items that exist in the library.
 
 Signal, in order of strength: series continuation, Audible similarity votes,
-author overlap, narrator overlap, genre affinity.
+description similarity, author overlap, narrator overlap, genre affinity.
 
-Ratings are deliberately NOT used yet. The column exists and is writable, but
-the only value in it today is a test stamp, so treating it as taste would poison
-the output. Fold `Rating` into `_seed_weight` once real ones accrue.
+Partial listens contribute in proportion to progress rather than counting like
+completed books. Ratings are signed and ramped once enough exist to avoid letting
+one early score reorder the whole shelf.
 """
 from collections import Counter, defaultdict
 
 from . import audible, config, jellyfin, listenarr, store, textmodel
 
-# Relative weights. Series continuation dominates on purpose: if he is five
-# books into something and owns the sixth, that is the answer.
+# Relative weights. Series continuation dominates on purpose: if a listener is
+# five books into something and owns the sixth, that is the answer.
 W_SERIES_NEXT = 100.0
 W_SIMS_VOTE = 12.0
 W_AUTHOR = 9.0
@@ -49,17 +49,20 @@ _RATING_WEIGHTS = (
 )
 
 # A book added to the library in the last this-many days gets a nudge -- new
-# arrivals are usually the ones he actually meant to get to.
+# arrivals are usually the ones the listener actually meant to get to.
 RECENT_DAYS = 90
 
 
-def _rating(item: dict) -> float | None:
+def _rating(item: dict, user_key: str | None = None) -> float | None:
     """This listener's score, or None -- including for a rating we refuse to trust.
 
     A known-bad rating reads as unrated everywhere: as a seed weight, in the
     ramp's rating count, and in the decision to treat the book as a seed at all.
     """
-    if (item.get("Id") or "").replace("-", "").lower() in config.IGNORED_RATING_ITEM_IDS:
+    user_key = (user_key or config.JELLYFIN_USER).casefold()
+    ignored = (config.IGNORED_RATING_ITEM_IDS
+               if user_key == config.JELLYFIN_USER.casefold() else ())
+    if (item.get("Id") or "").replace("-", "").lower() in ignored:
         return None
     return (item.get("UserData") or {}).get("Rating")
 
@@ -77,15 +80,15 @@ def rating_blend(rating_count: int) -> float:
     return min(1.0, progress / max(1, config.RATINGS_RAMP_SPAN))
 
 
-def _seed_weight(item: dict, blend: float) -> float:
-    """How hard one finished book should pull, given its rating and the ramp.
+def _seed_weight(item: dict, blend: float, user_key: str | None = None) -> float:
+    """How hard one seed should pull, given its rating and the ramp.
 
-    At blend 0 every finished book counts the same, so no rating steers anything.
-    At blend 1 the rating table applies in full.
+    At blend 0 the score itself has no effect. At blend 1 the rating table applies
+    in full; listening progress is applied separately.
     """
     if blend <= 0:
         return 1.0
-    score = _rating(item)
+    score = _rating(item, user_key)
     # The 0.0 threshold catches every valid score; the default covers a value
     # outside the server's 0-10 range rather than raising StopIteration.
     target = NEUTRAL_WEIGHT if score is None else next(
@@ -93,19 +96,42 @@ def _seed_weight(item: dict, blend: float) -> float:
     return 1.0 + (target - 1.0) * blend
 
 
-def _played(item: dict) -> bool:
+def _listening_progress(item: dict) -> float:
+    """How much of a book was consumed, normalised to 0.0 through 1.0."""
     ud = item.get("UserData") or {}
-    return bool(ud.get("Played")) or (ud.get("PlaybackPositionTicks") or 0) > 0
+    if ud.get("Played"):
+        return 1.0
+    percentage = ud.get("PlayedPercentage")
+    if isinstance(percentage, (int, float)):
+        return min(1.0, max(0.0, percentage / 100.0))
+    position = ud.get("PlaybackPositionTicks") or 0
+    runtime = item.get("RunTimeTicks") or 0
+    if position > 0 and runtime > 0:
+        return min(1.0, position / runtime)
+    return 0.0
 
 
-def _is_seed(item: dict) -> bool:
+def _engagement_weight(
+    item: dict, blend: float, user_key: str | None = None
+) -> float:
+    """Progress strength, with explicit ratings introduced by the same ramp."""
+    progress = _listening_progress(item)
+    if _rating(item, user_key) is None:
+        return progress
+    return progress + (1.0 - progress) * blend
+
+
+def _played(item: dict) -> bool:
+    return _listening_progress(item) > 0
+
+
+def _is_seed(item: dict, user_key: str | None = None) -> bool:
     """A book that says something about this listener's taste.
 
-    A rating counts even with no play state behind it: an explicit score is a
-    stronger statement than "the file was opened", and a book rated but never
-    marked played would otherwise contribute nothing at all.
+    A rating keeps an unplayed book eligible; the ratings ramp decides when that
+    explicit signal gains influence.
     """
-    return _played(item) or _rating(item) is not None
+    return _played(item) or _rating(item, user_key) is not None
 
 
 def _asin(item: dict) -> str | None:
@@ -156,6 +182,69 @@ def _title_keys(title: str) -> set[str]:
     return keys
 
 
+def _matching_audible_asin(item: dict, rows: list[dict]) -> str | None:
+    """Best title-and-author match in Listenarr's Audible search results."""
+    title = item.get("Name") or ""
+    full_title = _norm(title)
+    title_keys = _title_keys(title)
+    authors = {_norm(a) for a in _authors(item)}
+    matches = []
+    for position, row in enumerate(rows):
+        asin = row.get("asin")
+        candidate_title = row.get("title") or ""
+        if not asin or not candidate_title:
+            continue
+        candidate_authors = {
+            _norm((a.get("name") or "") if isinstance(a, dict) else str(a))
+            for a in (row.get("authors") or [])
+        }
+        if authors and not (authors & candidate_authors):
+            continue
+        exact_title = _norm(candidate_title) == full_title
+        if not exact_title and not (title_keys & _title_keys(candidate_title)):
+            continue
+        # With no author to corroborate an edition match, require the full title.
+        if not authors and not exact_title:
+            continue
+        matches.append((not exact_title, position, asin))
+    return min(matches)[2] if matches else None
+
+
+def _seed_sims(item: dict) -> list[dict]:
+    """Audible neighbours, resolving a dead library ASIN to its audio edition."""
+    source_asin = _asin(item)
+    if not source_asin:
+        return []
+    products = audible.sims(source_asin)
+    if products:
+        return products
+
+    tried = {source_asin}
+    cached_alias = store.get_audible_alias(source_asin)
+    if cached_alias:
+        tried.add(cached_alias)
+        products = audible.sims(cached_alias)
+        if products:
+            return products
+
+    title = item.get("Name") or ""
+    queries = [title]
+    authors = _authors(item)
+    if authors:
+        queries.append(f"{title} {authors[0]}")
+    for query in queries:
+        resolved = _matching_audible_asin(
+            item, listenarr.audible_search(query))
+        if not resolved or resolved in tried:
+            continue
+        tried.add(resolved)
+        products = audible.sims(resolved)
+        if products:
+            store.put_audible_alias(source_asin, resolved)
+            return products
+    return []
+
+
 def _owned_index(library: list[dict]) -> tuple[set[str], dict[str, set[str]]]:
     """ASINs owned, and normalised-title -> author-set for everything else.
 
@@ -191,10 +280,10 @@ def _already_owned(cand: dict, asins: set[str], by_title: dict[str, set[str]]) -
 
 
 def _taste(seeds: list[dict], weights: dict[str, float] | None = None) -> dict:
-    """Build a taste profile from HIS play history only.
+    """Build a taste profile from this user's play history only.
 
     Not from library ownership: this server has six users and the collection is
-    household-wide, so "we own it" is not evidence he likes it.
+    household-wide, so "we own it" is not evidence this user likes it.
     """
     genres: Counter = Counter()
     authors: Counter = Counter()
@@ -222,7 +311,7 @@ def _taste(seeds: list[dict], weights: dict[str, float] | None = None) -> dict:
 
 
 def _score_owned(
-    item: dict, taste: dict, votes: Counter, text: float
+    item: dict, taste: dict, votes: Counter, text: float, similarity_sources: int = 0
 ) -> tuple[float, list[str]]:
     """Score an owned, unplayed book. Returns (score, human-readable reasons)."""
     score = 0.0
@@ -238,16 +327,18 @@ def _score_owned(
     asin = _asin(item)
     if asin and votes.get(asin):
         score += W_SIMS_VOTE * votes[asin]
-        why.append(f"Audible lists it alongside {votes[asin]} book(s) you've listened to")
+        count = similarity_sources or 1
+        noun = "book" if count == 1 else "books"
+        why.append(f"Audible lists it alongside {count} {noun} you've listened to")
 
     shared_authors = [a for a in _authors(item) if a in taste["authors"]]
     if shared_authors:
-        score += W_AUTHOR * len(shared_authors)
+        score += W_AUTHOR * sum(taste["authors"][a] for a in shared_authors)
         why.append("by " + ", ".join(shared_authors[:2]) + ", who you've listened to")
 
     shared_narrators = [n for n in _people(item, "Narrator") if n in taste["narrators"]]
     if shared_narrators:
-        score += W_NARRATOR * len(shared_narrators)
+        score += W_NARRATOR * sum(taste["narrators"][n] for n in shared_narrators)
         why.append("narrated by " + shared_narrators[0])
 
     shared_genres = [g for g in (item.get("Genres") or []) if g in taste["genres"]]
@@ -260,25 +351,30 @@ def _score_owned(
 
 
 def _score_candidate(
-    cand: dict, taste: dict, votes: Counter, text: float
+    cand: dict, taste: dict, votes: Counter, text: float,
+    similarity_titles: list[str] | None = None,
 ) -> tuple[float, list[str]]:
     """Score a book not on disk. Less metadata to work with than an owned book."""
     score = W_SIMS_VOTE * votes.get(cand["asin"], 0)
     why: list[str] = []
-    n = votes.get(cand["asin"], 0)
-    if n:
-        why.append(f"Audible lists it alongside {n} book(s) you've listened to")
+    if votes.get(cand["asin"]):
+        titles = (similarity_titles or [])[:2]
+        if titles:
+            quoted = [f"“{title}”" for title in titles]
+            why.append("Audible recommends it alongside " + " and ".join(quoted))
+        else:
+            why.append("Audible recommends it alongside a book you've listened to")
     if cand.get("found_by"):
         why.append(f"found searching \u201c{cand['found_by']}\u201d")
 
     shared = [a for a in cand.get("authors") or [] if a in taste["authors"]]
     if shared:
-        score += W_AUTHOR * len(shared)
+        score += W_AUTHOR * sum(taste["authors"][a] for a in shared)
         why.append("by " + ", ".join(shared[:2]) + ", who you've listened to")
 
     shared_n = [n for n in cand.get("narrators") or [] if n in taste["narrators"]]
     if shared_n:
-        score += W_NARRATOR * len(shared_n)
+        score += W_NARRATOR * sum(taste["narrators"][n] for n in shared_n)
         why.append("narrated by " + shared_n[0])
 
     score += W_TEXT * text
@@ -344,21 +440,31 @@ def _keyword_candidates(queries: list[str], owned_check) -> dict[str, dict]:
     return found
 
 
-def run(update_playlist: bool = True) -> dict:
-    """One full recommendation pass. Returns both shelves plus run stats."""
-    run_id = store.start_run()
-    uid = jellyfin.user_id()
-    library = jellyfin.books(uid)
+def _playlist_name(user: jellyfin.User) -> str:
+    """Keep the legacy user's playlist stable; make every other name unique."""
+    if user.key == config.JELLYFIN_USER.casefold():
+        return config.PLAYLIST_NAME
+    return f"{config.PLAYLIST_NAME} — {user.name}"
 
-    seeds = [i for i in library if _is_seed(i)]
+
+def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
+    """Build one user's shelves and update only that user's playlist."""
+    run_id = store.start_run(user.key)
+    library = jellyfin.books(user.id)
+
+    seeds = [i for i in library if _is_seed(i, user.key)]
 
     # Signed mode -- where a bad rating pushes rather than merely failing to pull
     # -- needs enough ratings that no single one can steer the result. Counted
     # across the whole library, not just the seeds, so the figure is the honest
     # "how many ratings exist".
-    rating_count = sum(1 for i in library if _rating(i) is not None)
+    rating_count = sum(1 for i in library if _rating(i, user.key) is not None)
     blend = rating_blend(rating_count)
-    weights = {i["Id"]: _seed_weight(i, blend) for i in seeds}
+    weights = {
+        i["Id"]: (_seed_weight(i, blend, user.key)
+                  * _engagement_weight(i, blend, user.key))
+        for i in seeds
+    }
     taste = _taste(seeds, weights)
 
     owned_asins, owned_titles = _owned_index(library)
@@ -370,17 +476,19 @@ def run(update_playlist: bool = True) -> dict:
     votes: Counter = Counter()
     seed_of: dict[str, list[str]] = defaultdict(list)
     unowned: dict[str, dict] = {}
+    similarity_seeds = 0
 
     for seed in seeds:
-        asin = _asin(seed)
-        if not asin:
-            continue
         # A seed with no positive weight must not promote its neighbours: a book
         # scored 2 was previously still lending every similar title a full vote.
-        if weights[seed["Id"]] <= 0:
+        weight = weights[seed["Id"]]
+        if weight <= 0:
             continue
-        for sim in audible.sims(asin):
-            votes[sim["asin"]] += 1
+        similar = _seed_sims(seed)
+        if similar:
+            similarity_seeds += 1
+        for sim in similar:
+            votes[sim["asin"]] += weight
             seed_of[sim["asin"]].append(seed.get("Name") or "")
             if not owned_check(sim):
                 unowned.setdefault(sim["asin"], sim)
@@ -426,15 +534,17 @@ def run(update_playlist: bool = True) -> dict:
     for item in library:
         # Excludes rated-but-unplayed too: it is already a seed, and offering it
         # back as a suggestion would be nonsense.
-        if _is_seed(item):
+        if _is_seed(item, user.key):
             continue
         # Floored at zero on this shelf. A negative cosine is real evidence, but
         # W_TEXT is large enough that it could cancel a genuine author match and
         # then trip the `score <= 0` drop below -- silently removing a book by an
-        # author he likes because its blurb shares words with one he rated low.
+        # author they like because its blurb shares words with one they rated low.
         # The discover shelf keeps the negative, where filtering is the point.
         text = max(0.0, text_score(item["Id"]))
-        score, why = _score_owned(item, taste, votes, text)
+        asin = _asin(item)
+        score, why = _score_owned(
+            item, taste, votes, text, len(seed_of.get(asin, [])) if asin else 0)
         if score <= 0:
             continue
         if text > 0.05:
@@ -453,7 +563,7 @@ def run(update_playlist: bool = True) -> dict:
     own = own[: config.MAX_SHELF]
 
     # --- discover shelf: not on disk ---
-    suppressed = store.suppressed_asins() | listenarr.queued_asins()
+    suppressed = store.suppressed_asins(user.key) | listenarr.queued_asins()
 
     def rank(pool: dict[str, dict]) -> list[dict]:
         out = []
@@ -461,7 +571,8 @@ def run(update_playlist: bool = True) -> dict:
             if asin in suppressed:
                 continue
             text = text_score(f"asin:{asin}")
-            score, why = _score_candidate(cand, taste, votes, text)
+            score, why = _score_candidate(
+                cand, taste, votes, text, seed_of.get(asin, []))
             if score <= 0:
                 continue
             if text > 0.05:
@@ -488,22 +599,27 @@ def run(update_playlist: bool = True) -> dict:
     discover.sort(key=lambda r: -r["score"])
 
     playlist_id = None
+    playlist_name = _playlist_name(user)
     if update_playlist and own:
         playlist_id = jellyfin.set_playlist(
-            uid, config.PLAYLIST_NAME, [r["id"] for r in own]
+            user.id, playlist_name, [r["id"] for r in own]
         )
 
     store.finish_run(run_id, len(seeds), len(own), len(discover),
                      note=(f"playlist={playlist_id or 'skipped'} ratings={rating_count} "
-                           f"blend={blend:.2f} queries={','.join(queries)}"))
+                           f"blend={blend:.2f} sim_seeds={similarity_seeds} "
+                           f"queries={','.join(queries)}"))
     return {
+        "user_name": user.name,
         "seeds": len(seeds),
         "library": len(library),
         "ratings": rating_count,
         "blend": round(blend, 3),
+        "similarity_seeds": similarity_seeds,
         "own": own,
         "discover": discover,
         "keyword_picks": len(keyword_selected),
         "queries": queries,
         "playlist_id": playlist_id,
+        "playlist_name": playlist_name,
     }
