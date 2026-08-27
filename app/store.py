@@ -13,7 +13,7 @@ from . import config
 # Bumped whenever the shape of a cached sims payload changes. A stale entry is
 # worse than a miss: it looks fresh and silently scores zero on fields that were
 # not being kept when it was written.
-SIMS_SCHEMA_VERSION = 2
+SIMS_SCHEMA_VERSION = 3
 
 _SUBMITTED_SCHEMA = """
 CREATE TABLE IF NOT EXISTS submitted (
@@ -97,7 +97,9 @@ def init() -> None:
 
     `CREATE TABLE IF NOT EXISTS` will not reshape an existing table, so a version
     bump has to DROP: v1 keyed on `asin` alone, which collides once one ASIN has a
-    neighbour set per similarity axis.
+    neighbour set per similarity axis. v3 drops for a different reason -- the
+    rows are correct for the marketplace they were fetched from and wrong for
+    this one.
     """
     with db() as conn:
         conn.execute(
@@ -108,6 +110,11 @@ def init() -> None:
             # It is a cache; refetching costs one request per seed per axis.
             conn.execute("DROP TABLE IF EXISTS sims")
             conn.execute("DROP TABLE IF EXISTS doc_vectors")
+            # v3: every one of these was filled from the US catalogue, where a
+            # Canadian exclusive answers with an empty product. Kept and they
+            # would go on standing in for the real thing for the whole 168-hour
+            # TTL, so the region change would look like it had done nothing.
+            conn.execute("DROP TABLE IF EXISTS audible_aliases")
             conn.execute(
                 "INSERT INTO meta(key,value) VALUES('sims_schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

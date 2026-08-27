@@ -8,7 +8,32 @@ import httpx
 
 from . import config, store
 
-_BASE = "https://api.audible.com/1.0/catalog"
+# Audible runs one catalogue per marketplace on its own host, and an ASIN sold
+# in one is not necessarily present in another: a US lookup of a Canadian
+# exclusive returns 200 with no product rather than a 404, so the failure is
+# silent. Anything not listed falls back to the US host, which is Audible's
+# oldest and the safest guess for a region this map has not met.
+_HOSTS = {
+    "us": "api.audible.com",
+    "ca": "api.audible.ca",
+    "uk": "api.audible.co.uk",
+    "au": "api.audible.com.au",
+    "de": "api.audible.de",
+    "fr": "api.audible.fr",
+    "it": "api.audible.it",
+    "es": "api.audible.es",
+    "jp": "api.audible.co.jp",
+    "in": "api.audible.in",
+    "br": "api.audible.com.br",
+}
+
+
+def _host() -> str:
+    return _HOSTS.get(config.AUDIBLE_REGION, _HOSTS["us"])
+
+
+def _base() -> str:
+    return f"https://{_host()}/1.0/catalog"
 _RESPONSE_GROUPS = "product_desc,contributors,product_attrs,media"
 _TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
@@ -60,7 +85,7 @@ def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
     }
     try:
         with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.get(f"{_BASE}/products/{asin}/sims", params=params)
+            resp = c.get(f"{_base()}/products/{asin}/sims", params=params)
             resp.raise_for_status()
             products = resp.json().get("similar_products") or []
     except (httpx.HTTPError, ValueError):
@@ -76,7 +101,7 @@ def product(asin: str) -> dict | None:
     params = {"response_groups": "contributors,product_attrs,product_desc,media"}
     try:
         with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.get(f"{_BASE}/products/{asin}", params=params)
+            resp = c.get(f"{_base()}/products/{asin}", params=params)
             resp.raise_for_status()
             return resp.json().get("product")
     except (httpx.HTTPError, ValueError):

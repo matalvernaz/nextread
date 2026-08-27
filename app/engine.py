@@ -162,6 +162,25 @@ def _norm(text: str) -> str:
     return " ".join("".join(c if c.isalnum() or c.isspace() else " " for c in text).lower().split())
 
 
+def _norm_author(name: str) -> str:
+    """`_norm`, with runs of initials joined: "R. C. Joshua" == "RC Joshua".
+
+    `_norm` strips the punctuation but leaves the gap it made, so those two
+    spellings normalise to "r c joshua" and "rc joshua" and do not match. That
+    is not hypothetical: book one of Demon World Boba Shop is tagged "RC Joshua"
+    in this library while books two to five are "R. C. Joshua", and since an
+    author has to agree for a title match to count as owned, the one spelling
+    made a book already on disk get recommended back.
+    """
+    joined: list[str] = []
+    for part in _norm(name).split():
+        if len(part) == 1 and joined and len(joined[-1]) <= 2 and joined[-1].isalpha():
+            joined[-1] += part
+        else:
+            joined.append(part)
+    return " ".join(joined)
+
+
 def _title_keys(title: str) -> set[str]:
     """Normalised forms a title might be matched under.
 
@@ -256,7 +275,7 @@ def _owned_index(library: list[dict]) -> tuple[set[str], dict[str, set[str]]]:
     asins = {_asin(i) for i in library if _asin(i)}
     by_title: dict[str, set[str]] = defaultdict(set)
     for item in library:
-        authors = {_norm(a) for a in _authors(item)}
+        authors = {_norm_author(a) for a in _authors(item)}
         for key in _title_keys(item.get("Name") or ""):
             by_title[key] |= authors
     return asins, by_title
@@ -271,7 +290,7 @@ def _already_owned(cand: dict, asins: set[str], by_title: dict[str, set[str]]) -
     """
     if cand["asin"] in asins:
         return True
-    cand_authors = {_norm(a) for a in cand.get("authors") or []}
+    cand_authors = {_norm_author(a) for a in cand.get("authors") or []}
     for key in _title_keys(cand.get("title") or ""):
         if key not in by_title:
             continue
