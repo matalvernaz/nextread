@@ -56,6 +56,36 @@ services:
       - traefik.http.routers.nextread-api.tls.certresolver=le-dns
       - traefik.http.routers.nextread-api.service=nextread
       - traefik.http.routers.nextread-api.priority=100
+      # The same API, reachable at the Jellyfin origin, so a client that already
+      # knows where Jellyfin is needs no second address typed into it. Copied
+      # from the echofin-share gateway, which EchoFin already discovers this way
+      # by probing the origin it is signed in to.
+      #
+      # ONLY /nextread/api. The page authenticates from the forward-auth header
+      # and `_viewer` falls back to the configured user when there is none, and
+      # the jellyfin host is access level Open -- so serving the page here would
+      # hand anyone who reached it that account. The API introspects a Jellyfin
+      # token and is already SSO-free on its own host, so this router adds no
+      # exposure that does not exist today.
+      #
+      # Both hosts: EchoFin moves between them, and the derived address follows
+      # whichever one it is on, which is what keeps Discover on the LAN at home
+      # instead of out through Cloudflare and back.
+      - "traefik.http.routers.nextread-jellyfin.rule=(Host(`jellyfin.thealvernaz.space`) || Host(`jellyfin-lan.thealvernaz.space`)) && PathPrefix(`/nextread/api`)"
+      - traefik.http.routers.nextread-jellyfin.entrypoints=websecure
+      # 200, matching echofin-share: it has to outrank Jellyfin's own Host()
+      # router, whose rule is shorter but which would otherwise take the path.
+      - traefik.http.routers.nextread-jellyfin.priority=200
+      # A docker label, not an @file middleware. A middleware named @file that
+      # does not exist drops the router silently and the host 404s with nothing
+      # in the log, which is a documented way to lose an afternoon here.
+      - traefik.http.routers.nextread-jellyfin.middlewares=nextread-strip
+      - traefik.http.middlewares.nextread-strip.stripprefix.prefixes=/nextread
+      - traefik.http.routers.nextread-jellyfin.service=nextread
+      - traefik.http.routers.nextread-jellyfin.tls=true
+      - traefik.http.routers.nextread-jellyfin.tls.certresolver=le-dns
+      - traefik.http.routers.nextread-jellyfin.tls.domains[0].main=jellyfin.thealvernaz.space
+      - traefik.http.routers.nextread-jellyfin.tls.domains[1].main=jellyfin-lan.thealvernaz.space
       - "traefik.http.routers.nextread-public.rule=Host(`nextread.thealvernaz.space`) && PathPrefix(`/favicon`)"
       - traefik.http.routers.nextread-public.entrypoints=websecure
       - traefik.http.routers.nextread-public.tls=true
