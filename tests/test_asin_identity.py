@@ -60,7 +60,10 @@ check("asin sent as the query", (client.params or {}).get("query"), "B0CWW1L8NL"
 meta, _ = lookup([OTHER, WANTED])
 check("exact match found among others", (meta or {}).get("title"), WANTED["title"])
 
-# The one that mattered: results, but none of them is this ASIN.
+# With Audible unable to identify it either, the three ways the search can
+# fail must all refuse rather than substitute.
+listenarr._from_audible_product = lambda asin: None
+
 meta, _ = lookup([OTHER])
 check("a different book is refused, not substituted", meta, None)
 
@@ -72,6 +75,22 @@ check("a titleless match is refused", meta, None)
 
 meta, _ = lookup([])
 check("no results is refused", meta, None)
+
+# But Audible's own product record is addressed BY the ASIN, so it cannot
+# return a different book. Where it can identify one the search could not, the
+# add proceeds -- otherwise a book like Unicorn Breeder, which the search
+# returns titleless in every store, could never be asked for at all.
+DIRECT = {"asin": "B0CWW1L8NL", "title": "I Ran Away to Evil: A Cozy LitRPG Rom-Com",
+          "region": "us", "authors": ["Mystic Neptune"]}
+listenarr._from_audible_product = lambda asin: dict(DIRECT)
+
+meta, _ = lookup([OTHER])
+check("identified directly when the search names another book",
+      (meta or {}).get("title"), DIRECT["title"])
+meta, _ = lookup([{"asin": "B0CWW1L8NL", "title": ""}])
+check("identified directly when the search has no title",
+      (meta or {}).get("title"), DIRECT["title"])
+check("and filed under the store that had it", (meta or {}).get("region"), "us")
 
 if failures:
     print("FAIL")

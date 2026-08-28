@@ -137,6 +137,18 @@ def audible_metadata(asin: str) -> dict | None:
     if not results:
         log.warning("metadata lookup found nothing asin=%s", asin)
         return None
+    if exact is None or not (_to_add_metadata(exact).get("title") or "").strip():
+        # Listenarr's search could not identify this ASIN -- either it returned
+        # nothing that IS this ASIN, or it returned it with no title. Audible's
+        # own product endpoint can, and does for books its search cannot:
+        # B0HC7V8ZR4 ("Unicorn Breeder") comes back titleless from the search in
+        # both stores while the product lookup has it on .com. Without this,
+        # such a book cannot be asked for at all.
+        direct = _from_audible_product(asin)
+        if direct is not None:
+            log.info("identified asin=%s from Audible directly, region=%s",
+                     asin, direct.get("region"))
+            return direct
     if exact is None:
         # NEVER the first result instead. This is an identifier lookup: a
         # result that is not this ASIN is a different book, and handing it to
@@ -159,6 +171,45 @@ def audible_metadata(asin: str) -> dict | None:
         log.warning("metadata for asin=%s carries no title; refusing the add", asin)
         return None
     return metadata
+
+
+def _from_audible_product(asin: str) -> dict | None:
+    """Add-metadata built from Audible's own product record.
+
+    The identity path of last resort, and the only one that never guesses: the
+    product endpoint is addressed BY the ASIN, so what it returns either is
+    that book or is nothing. `audible.product` already walks every configured
+    marketplace and reports which one had it.
+    """
+    from . import audible
+
+    found = audible.product(asin)
+    if not found:
+        return None
+    title = (found.get("title") or "").strip()
+    if not title:
+        return None
+    series = (found.get("series") or [{}])[0] if found.get("series") else {}
+    release = found.get("release_date") or ""
+    runtime = found.get("runtime_length_min")
+    return {
+        "asin": asin,
+        "source": "Audible",
+        "region": found.get("_region") or config.AUDIBLE_REGION,
+        "title": title,
+        "subtitle": (found.get("subtitle") or "").strip() or None,
+        "authors": _names(found.get("authors")),
+        "narrators": _names(found.get("narrators")),
+        "genres": [],
+        "language": found.get("language"),
+        "publisher": found.get("publisher_name"),
+        "publishedDate": release or None,
+        "publishYear": release[:4] or None,
+        "series": series.get("title") or series.get("name"),
+        "seriesNumber": series.get("sequence"),
+        "seriesMemberships": [],
+        "runtime": runtime * 60 if isinstance(runtime, int) else None,
+    }
 
 
 def audible_search(query: str, limit: int = 25) -> list[dict]:
