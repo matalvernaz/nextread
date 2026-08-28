@@ -297,10 +297,26 @@ means the question cannot arise.
 
 ## Deploy
 
-Stack lives at `/opt/stacks/nextread` inside the `dockge` Incus container.
+    cp .env.example .env      # and put a Jellyfin API key in it
+    docker compose up -d --build
 
-    docker build -t nextread:local .
-    docker compose up -d
+The image is published to `ghcr.io/matalvernaz/nextread` for `linux/amd64` and
+`linux/arm64` on every push to `master` and every `v*` tag. `--build` above
+builds from source and tags it with that same name, so this host runs what
+everybody else pulls; `docker compose pull` takes the published one instead.
+
+`compose.yaml` is **this** deployment, kept in the repo as the record of what
+is running: its hostnames, library ids and `access-nextread@file` middleware
+are particular to one homelab, and copying it verbatim gets you a router that
+Traefik drops silently. Take the environment block and the
+`nextread-jellyfin` router from it; the proxy section above is the part meant
+to be copied.
+
+Only `JELLYFIN_TOKEN` is required. `LIBRARY_IDS` unset means every library
+Jellyfin calls `books`, which is usually right. Without `LISTENARR_URL` the
+shelves and search work and requesting a book is simply unavailable.
+
+Here it runs at `/opt/stacks/nextread` inside the `dockge` Incus container.
 
 Access level is data, not config: the `nextread` entry in
 `/opt/stacks/keycloak-invite/catalog.json` renders the `access-nextread@file`
