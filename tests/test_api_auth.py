@@ -41,7 +41,7 @@ def fake_introspect(token: str) -> jellyfin.User:
 jellyfin.user_from_token = fake_introspect
 jellyfin.library_ids = lambda: ["lib-audio", "lib-graphic"]
 shelves.engine.run = lambda user, update_playlist=True: {
-    "user_name": user.name, "own": [], "discover": [], "owned_asins": set(),
+    "user_name": user.name, "own": [], "discover": [], "owned_index": (set(), {}),
     "playlist_name": "Next Read",
 }
 listenarr.add = lambda asin, monitored=True: listenarr.AddResult(True, "Sent", 1)

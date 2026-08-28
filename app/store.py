@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS requests (
     user_key     TEXT NOT NULL,
     asin         TEXT NOT NULL,
     title        TEXT,
+    authors      TEXT,
     requested_at REAL NOT NULL,
     fulfilled_at REAL,
     PRIMARY KEY (user_key, asin)
@@ -133,6 +134,7 @@ def init() -> None:
         conn.executescript(SCHEMA)
         _migrate_user_scope(conn)
         _migrate_requests(conn)
+        _migrate_request_authors(conn)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -194,6 +196,18 @@ def _migrate_requests(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO meta(key,value) VALUES('requests_migrated','1')")
 
 
+def _migrate_request_authors(conn: sqlite3.Connection) -> None:
+    """Add the author column arrival now agrees on, to a ledger written without it.
+
+    Rows from before it stay NULL, and an authorless row is read as "the title
+    decides" -- which is how the requests that were stuck under the ASIN-only
+    check resolve on the first read after this lands.
+    """
+    if "authors" in _columns(conn, "requests"):
+        return
+    conn.execute("ALTER TABLE requests ADD COLUMN authors TEXT")
+
+
 def _sims_key(asin: str, axis: str) -> str:
     """Cache key. The axis is part of it: one ASIN has a different neighbour set
     per `similarity_type`, and keying on the ASIN alone collides across axes."""
@@ -217,8 +231,6 @@ def get_shelf(user_key: str) -> tuple[dict, float] | None:
         data = json.loads(row["payload"])
     except ValueError:
         return None
-    # Sets do not survive JSON, and this one is membership-tested per request.
-    data["owned_asins"] = set(data.get("owned_asins") or [])
     return data, row["computed_at"]
 
 
@@ -327,17 +339,22 @@ def put_vectors(kind: str, vectors: dict) -> None:
         )
 
 
-def record_request(user_key: str, asin: str, title: str) -> bool:
+def record_request(user_key: str, asin: str, title: str,
+                   authors: list | tuple = ()) -> bool:
     """Log that this account asked for a book. True when it is a new request.
 
     Idempotent on purpose: a second tap on the same book must not restart the
     "still looking" clock or spend another day's allowance.
+
+    The title and authors are kept because the ASIN is not enough to recognise
+    the book when it lands: it arrives tagged with whichever ASIN the other
+    marketplace issued for the same edition.
     """
     with db() as conn:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO requests(user_key,asin,title,requested_at) "
-            "VALUES(?,?,?,?)",
-            (user_key, asin, title, time.time()),
+            "INSERT OR IGNORE INTO requests(user_key,asin,title,authors,requested_at) "
+            "VALUES(?,?,?,?,?)",
+            (user_key, asin, title, json.dumps(list(authors)), time.time()),
         )
     return cur.rowcount > 0
 
@@ -346,11 +363,22 @@ def requests_for(user_key: str) -> list[dict]:
     """Every book this account has asked for, newest first."""
     with db() as conn:
         rows = conn.execute(
-            "SELECT asin,title,requested_at,fulfilled_at FROM requests "
+            "SELECT asin,title,authors,requested_at,fulfilled_at FROM requests "
             "WHERE user_key=? ORDER BY requested_at DESC",
             (user_key,),
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "authors": _authors_of(r["authors"])} for r in rows]
+
+
+def _authors_of(payload) -> list[str]:
+    """The stored author list. Empty for a row written before the column."""
+    if not payload:
+        return []
+    try:
+        names = json.loads(payload)
+    except ValueError:
+        return []
+    return [n for n in names if isinstance(n, str) and n] if isinstance(names, list) else []
 
 
 def requests_since(user_key: str, cutoff: float) -> int:

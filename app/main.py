@@ -80,7 +80,7 @@ def index(request: Request, msg: str = "", err: str = ""):
             "msg": msg,
             "err": err,
             "last_run": last["finished_at"] if last else None,
-            "requests": wants.states(user.key, data["owned_asins"]),
+            "requests": wants.states(user.key, shelves.owned_index(user)),
         },
     )
 

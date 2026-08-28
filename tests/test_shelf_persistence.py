@@ -36,7 +36,7 @@ def fake_run(user, update_playlist=True):
     return {
         "own": [{"id": "i1", "title": "A Book", "why": []}],
         "discover": [{"asin": "A1", "title": "One"}, {"asin": "A2", "title": "Two"}],
-        "owned_asins": {"B0OWNED"},
+        "owned_index": ({"B0OWNED"}, {"a book": {"someone"}}),
         "playlist_name": "Next Read",
         "playlist_id": None,
         "seeds": 1, "library": 2, "ratings": 0,
@@ -70,8 +70,10 @@ gate.clear()
 restored = shelves.result(matt, update_playlist=False)
 check("restored without a synchronous rebuild", len(builds), 1)
 check("restored content", len(restored["discover"]), 2)
-check("a set survives the round trip", isinstance(restored["owned_asins"], set), True)
-check("and its contents", "B0OWNED" in restored["owned_asins"], True)
+# The index is far larger than the shelf and its sets do not survive JSON, so a
+# build hands it straight to the owned cache and it never reaches the payload.
+check("the index is not persisted with the shelf", "owned_index" in restored, False)
+check("it is published instead", shelves.owned_index(matt)[0], {"B0OWNED"})
 
 # Now let the rebuild finish, and confirm it happened exactly once.
 gate.set()

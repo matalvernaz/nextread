@@ -270,10 +270,17 @@ class AddResult(NamedTuple):
     `ok` means the book is now in Listenarr's library and will be acquired --
     including the case where it was already there, because the caller's
     question is "is this book coming?" and the answer is yes either way.
+
+    `title` and `authors` are what the book turned out to be once the ASIN was
+    resolved. The request ledger keeps them so it can recognise the book on
+    arrival: the ASIN asked for belongs to the marketplace it was found in, and
+    the tagger writes whichever the other store issued for the same edition.
     """
     ok: bool
     message: str
     audiobook_id: int | None
+    title: str = ""
+    authors: tuple[str, ...] = ()
 
 
 def find_by_asin(asin: str) -> dict | None:
@@ -310,7 +317,9 @@ def add(asin: str, monitored: bool = True) -> AddResult:
     """
     existing = find_by_asin(asin)
     if existing is not None:
-        return AddResult(True, "Already in Listenarr", _audiobook_id(existing))
+        title, authors = _identity(existing)
+        return AddResult(
+            True, "Already in Listenarr", _audiobook_id(existing), title, authors)
 
     meta = audible_metadata(asin)
     if not meta:
@@ -351,7 +360,17 @@ def add(asin: str, monitored: bool = True) -> AddResult:
     except ValueError:
         payload = {}
     message = "Already in Listenarr" if resp.status_code == 409 else "Sent to Listenarr"
-    return AddResult(True, message, _audiobook_id(payload.get("audiobook")))
+    return AddResult(True, message, _audiobook_id(payload.get("audiobook")),
+                     (meta.get("title") or "").strip(),
+                     tuple(meta.get("authors") or ()))
+
+
+def _identity(row) -> tuple[str, tuple[str, ...]]:
+    """Title and authors out of an audiobook row, whichever shape they arrive in."""
+    if not isinstance(row, dict):
+        return "", ()
+    title = (row.get("title") or row.get("Title") or "").strip()
+    return title, tuple(_names(row.get("authors") or row.get("Authors")))
 
 
 def _audiobook_id(row) -> int | None:

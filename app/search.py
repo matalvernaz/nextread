@@ -32,7 +32,7 @@ def search(user: jellyfin.User, query: str, limit: int | None = None) -> list[di
     asins, by_title = shelves.owned_index(user)
     # Outstanding only. A request that has arrived is described by `owned`, and
     # showing both would have a book claim to be on order and on the shelf.
-    requested = {r["asin"] for r in wants.states(user.key, asins)
+    requested = {r["asin"] for r in wants.states(user.key, (asins, by_title))
                  if r["state"] != wants.IN_LIBRARY}
     results = []
     for row in rows:
