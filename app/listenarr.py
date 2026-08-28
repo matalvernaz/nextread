@@ -111,7 +111,13 @@ def audible_metadata(asin: str) -> dict | None:
     """
     try:
         with _client() as c:
-            resp = c.get(f"{_API}/search/audible", params={"query": asin})
+            # The region, for the same reason `audible_search` states it. Left
+            # off, this call and that one could resolve to different
+            # marketplaces, which is how the same ASIN answers here and not
+            # there.
+            resp = c.get(
+                f"{_API}/search/audible",
+                params={"query": asin, "region": config.AUDIBLE_REGION})
             resp.raise_for_status()
             results = resp.json().get("results") or []
     except (httpx.HTTPError, ValueError) as exc:
@@ -121,7 +127,28 @@ def audible_metadata(asin: str) -> dict | None:
         log.warning("metadata lookup found nothing asin=%s", asin)
         return None
     exact = next((r for r in results if (r.get("asin") or "").upper() == asin.upper()), None)
-    return _to_add_metadata(exact or results[0])
+    if exact is None:
+        # NEVER the first result instead. This is an identifier lookup: a
+        # result that is not this ASIN is a different book, and handing it to
+        # the add makes the library acquire something nobody asked for.
+        #
+        # It did exactly that on 2026-08-28. A request for "I Ran Away to Evil"
+        # was added with an empty title, Listenarr searched on what it had, and
+        # downloaded Dark Tower III: The Waste Lands, which then imported under
+        # `Unknown Author/Unknown Title` because it matched nothing either.
+        log.warning(
+            "metadata lookup returned %d result(s) for asin=%s and none of them "
+            "is that ASIN; refusing rather than substituting %r",
+            len(results), asin, (results[0].get("title") or "")[:60])
+        return None
+    metadata = _to_add_metadata(exact)
+    if not (metadata.get("title") or "").strip():
+        # A title is what the acquisition searches on. Without one it searches
+        # on nothing and takes whatever scores first, which is the same failure
+        # by a different route.
+        log.warning("metadata for asin=%s carries no title; refusing the add", asin)
+        return None
+    return metadata
 
 
 def audible_search(query: str, limit: int = 25) -> list[dict]:
@@ -202,7 +229,11 @@ def add(asin: str, monitored: bool = True) -> AddResult:
 
     meta = audible_metadata(asin)
     if not meta:
-        return AddResult(False, "No Audible metadata found for that ASIN", None)
+        return AddResult(
+            False,
+            "That book could not be identified well enough to ask for it. "
+            "Nothing was added.",
+            None)
 
     body = {
         "metadata": meta,
