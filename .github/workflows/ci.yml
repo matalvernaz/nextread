@@ -21,12 +21,14 @@ jobs:
         # Each file is a standalone script that exits non-zero on failure, not a
         # pytest suite. Looping keeps one failure from hiding the rest, and the
         # names are printed so a red run says which one without opening the log.
+        # `test_*` rather than `*`: `harness.py` is a module these import, and
+        # running it as a test would report a green result for nothing.
         env:
           JELLYFIN_TOKEN: ci-placeholder-token
         run: |
           set -u
           status=0
-          for t in tests/*.py; do
+          for t in tests/test_*.py; do
             if python3 "$t" > /tmp/out 2>&1; then
               echo "PASS  $t"
             else

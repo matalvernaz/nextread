@@ -282,9 +282,10 @@ server does not leave the network to reach this.
 
 ## Tests
 
-Run them against the image, with **no `/data` mounted**:
+CI runs them on every push and pull request. To run them by hand, use the image
+with **no `/data` mounted** — never `docker exec` into the running service:
 
-    docker run --rm -v /tmp/nrt:/work -w /work nextread:local \
+    docker run --rm -v "$PWD":/work -w /work ghcr.io/matalvernaz/nextread:latest \
         bash -c 'for t in tests/test_*.py; do python "$t" || exit 1; done'
 
 The dependencies exist only in the container, and that container's environment
