@@ -61,7 +61,7 @@ def _names(values) -> list[str]:
     return out
 
 
-def _to_add_metadata(result: dict) -> dict:
+def _to_add_metadata(result: dict, region: str | None = None) -> dict:
     """Map a search result onto `AudibleBookMetadata`.
 
     These are two different DTOs and the difference is not cosmetic: the search
@@ -75,7 +75,10 @@ def _to_add_metadata(result: dict) -> dict:
     return {
         "asin": result.get("asin"),
         "source": "Audible",
-        "region": config.AUDIBLE_REGION,
+        # The store this was actually found in, not the preferred one: the
+        # library spans both, and telling Listenarr the wrong one sends its own
+        # lookups somewhere that does not carry the book.
+        "region": region or config.AUDIBLE_REGION,
         "title": result.get("title"),
         "authors": _names(result.get("authors")),
         "narrators": _names(result.get("narrators")),
@@ -109,24 +112,31 @@ def audible_metadata(asin: str) -> dict | None:
     Sourced from Listenarr's own Audible lookup rather than Audible directly, so
     the fields match whatever its provider currently returns.
     """
-    try:
-        with _client() as c:
-            # The region, for the same reason `audible_search` states it. Left
-            # off, this call and that one could resolve to different
-            # marketplaces, which is how the same ASIN answers here and not
-            # there.
-            resp = c.get(
-                f"{_API}/search/audible",
-                params={"query": asin, "region": config.AUDIBLE_REGION})
-            resp.raise_for_status()
-            results = resp.json().get("results") or []
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("metadata lookup failed asin=%s (%s)", asin, exc)
-        return None
+    # Every configured marketplace, in order, until one returns this exact
+    # ASIN. A book sold only in the other store answers with nothing here, and
+    # asking one store alone is what made a real book look unidentifiable.
+    results: list[dict] = []
+    exact = None
+    found_region = config.AUDIBLE_REGION
+    for region in config.AUDIBLE_REGIONS:
+        try:
+            with _client() as c:
+                resp = c.get(
+                    f"{_API}/search/audible", params={"query": asin, "region": region})
+                resp.raise_for_status()
+                found = resp.json().get("results") or []
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("metadata lookup failed asin=%s region=%s (%s)", asin, region, exc)
+            continue
+        results = results or found
+        exact = next(
+            (r for r in found if (r.get("asin") or "").upper() == asin.upper()), None)
+        if exact is not None:
+            found_region = region
+            break
     if not results:
         log.warning("metadata lookup found nothing asin=%s", asin)
         return None
-    exact = next((r for r in results if (r.get("asin") or "").upper() == asin.upper()), None)
     if exact is None:
         # NEVER the first result instead. This is an identifier lookup: a
         # result that is not this ASIN is a different book, and handing it to
@@ -141,7 +151,7 @@ def audible_metadata(asin: str) -> dict | None:
             "is that ASIN; refusing rather than substituting %r",
             len(results), asin, (results[0].get("title") or "")[:60])
         return None
-    metadata = _to_add_metadata(exact)
+    metadata = _to_add_metadata(exact, region=found_region)
     if not (metadata.get("title") or "").strip():
         # A title is what the acquisition searches on. Without one it searches
         # on nothing and takes whatever scores first, which is the same failure
@@ -158,16 +168,40 @@ def audible_search(query: str, limit: int = 25) -> list[dict]:
     Listenarr's provider is authenticated, so this is the only route to keyword
     and genre discovery without standing up Audible credentials of our own.
     """
+    # Every configured marketplace, merged, first store's ordering kept and
+    # later ones appended. Not "first store with any hit": a title search that
+    # stopped at the preferred region would never surface the half of this
+    # library that only the other store sells.
+    #
+    # Region stated rather than left to Listenarr's own default. Its
+    # `DefaultSearchRegion` is a setting, so a reset of its database would put
+    # these searches back on the US store without a word.
+    results: list[dict] = []
+    seen: set[str] = set()
+    failures = 0
     try:
-        with _client() as c:
-            # Region stated rather than left to Listenarr's own default. Its
-            # `DefaultSearchRegion` is a setting, so a reset of its database
-            # would put this search back on the US store without a word.
-            resp = c.get(
-                f"{_API}/search/audible",
-                params={"query": query, "region": config.AUDIBLE_REGION})
-            resp.raise_for_status()
-            results = (resp.json().get("results") or [])[:limit]
+        for region in config.AUDIBLE_REGIONS:
+            try:
+                with _client() as c:
+                    resp = c.get(
+                        f"{_API}/search/audible",
+                        params={"query": query, "region": region})
+                    resp.raise_for_status()
+                    found = resp.json().get("results") or []
+            except (httpx.HTTPError, ValueError):
+                failures += 1
+                continue
+            for row in found:
+                asin = (row.get("asin") or "").upper()
+                # An ASIN sold in both stores is one book, listed once.
+                if asin and asin in seen:
+                    continue
+                if asin:
+                    seen.add(asin)
+                results.append(row)
+        if failures == len(config.AUDIBLE_REGIONS):
+            raise httpx.HTTPError("every marketplace failed")
+        results = results[:limit]
     except (httpx.HTTPError, ValueError) as exc:
         # This is also the ASIN resolver for the three quarters of the library
         # with no Audible id of its own, so losing it quietly thins the unowned

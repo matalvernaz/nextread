@@ -28,12 +28,21 @@ _HOSTS = {
 }
 
 
-def _host() -> str:
-    return _HOSTS.get(config.AUDIBLE_REGION, _HOSTS["us"])
+def _host(region: str | None = None) -> str:
+    return _HOSTS.get(region or config.AUDIBLE_REGION, _HOSTS["us"])
 
 
-def _base() -> str:
-    return f"https://{_host()}/1.0/catalog"
+def _base(region: str | None = None) -> str:
+    return f"https://{_host(region)}/1.0/catalog"
+
+
+def _has_product(payload) -> bool:
+    """Whether a marketplace actually carries this book.
+
+    A store that does not sell it answers **200 with an empty product**, not a
+    404, so the absence is silent and only the missing title gives it away.
+    """
+    return bool(payload) and bool((payload.get("title") or "").strip())
 _RESPONSE_GROUPS = "product_desc,contributors,product_attrs,media"
 _TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
@@ -83,15 +92,25 @@ def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
         "num_results": config.SIMS_PER_SEED,
         "similarity_type": axis,
     }
-    try:
-        with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.get(f"{_base()}/products/{asin}/sims", params=params)
-            resp.raise_for_status()
-            products = resp.json().get("similar_products") or []
-    except (httpx.HTTPError, ValueError):
-        return []
+    # Each marketplace in turn. A seed sold only in the other store returns an
+    # empty neighbour list rather than an error, so "no neighbours" and "wrong
+    # store" look identical from one region alone.
+    thinned: list[dict] = []
+    for region in config.AUDIBLE_REGIONS:
+        try:
+            with httpx.Client(timeout=_TIMEOUT) as c:
+                resp = c.get(f"{_base(region)}/products/{asin}/sims", params=params)
+                resp.raise_for_status()
+                products = resp.json().get("similar_products") or []
+        except (httpx.HTTPError, ValueError):
+            continue
+        thinned = [_thin(p) for p in products if p.get("asin")]
+        if thinned:
+            break
 
-    thinned = [_thin(p) for p in products if p.get("asin")]
+    # Cached even when empty: every store was asked and none had neighbours,
+    # which is an answer, and re-asking it per page load is what the cache
+    # exists to stop.
     store.put_sims(asin, axis, thinned)
     return thinned
 
@@ -108,13 +127,24 @@ def product(asin: str) -> dict | None:
     if cached is not None:
         return cached
     params = {"response_groups": "contributors,product_attrs,product_desc,media"}
-    try:
-        with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.get(f"{_base()}/products/{asin}", params=params)
-            resp.raise_for_status()
-            found = resp.json().get("product")
-    except (httpx.HTTPError, ValueError):
-        return None
-    if found:
-        store.put_product(asin, found)
-    return found
+    # Every configured marketplace, in order, until one actually carries it.
+    # Stopping at the first is what made a book sold only in the other store
+    # look like a book that does not exist.
+    for region in config.AUDIBLE_REGIONS:
+        try:
+            with httpx.Client(timeout=_TIMEOUT) as c:
+                resp = c.get(f"{_base(region)}/products/{asin}", params=params)
+                resp.raise_for_status()
+                found = resp.json().get("product")
+        except (httpx.HTTPError, ValueError):
+            continue
+        if _has_product(found):
+            # The region it was actually found in, so a caller handing this on
+            # names the store that has it rather than the one we prefer.
+            found = {**found, "_region": region}
+            store.put_product(asin, found)
+            return found
+    # Deliberately not cached. An absence here is "no configured store sells
+    # it", which a new region in the list would change, and remembering it for
+    # a month would outlive that.
+    return None
