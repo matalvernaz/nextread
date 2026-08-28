@@ -636,9 +636,11 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
                            f"queries={','.join(queries)}"))
     return {
         "user_name": user.name,
-        # Every ASIN on disk. A requested book has arrived when its ASIN turns
-        # up here, which is the whole of the arrival check -- no status to poll.
-        "owned_asins": owned_asins,
+        # What is on disk, as ASINs and as titles-to-authors. Handed back so the
+        # caller can publish it rather than list the library again to rebuild
+        # the same thing; it is dropped before the shelf is cached, being far
+        # larger than the shelf and derivable from one listing.
+        "owned_index": (owned_asins, owned_titles),
         "seeds": len(seeds),
         "library": len(library),
         "ratings": rating_count,

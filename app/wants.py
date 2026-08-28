@@ -7,7 +7,7 @@ later that quietly skips half of it.
 """
 import time
 
-from . import config, jellyfin, listenarr, logs, store
+from . import config, engine, jellyfin, listenarr, logs, store
 
 log = logs.get("wants")
 
@@ -64,7 +64,10 @@ def want(user: jellyfin.User, asin: str, title: str = "") -> tuple[str, str]:
         log.warning("want refused user=%s asin=%s reason=%s", user.key, asin, result.message)
         raise Denied(result.message)
 
-    store.record_request(user.key, asin, title)
+    # What Listenarr resolved the ASIN to, preferred over what the caller typed:
+    # it is the spelling the tagger will use when the book lands, and the
+    # arrival check has to recognise it.
+    store.record_request(user.key, asin, result.title or title, result.authors)
     log.info("want accepted user=%s asin=%s audiobook_id=%s listenarr=%r",
              user.key, asin, result.audiobook_id, result.message)
 
@@ -87,17 +90,18 @@ def dismiss(user: jellyfin.User, asin: str) -> None:
     store.dismiss(user.key, asin)
 
 
-def states(user_key: str, owned_asins: set) -> list[dict]:
+def states(user_key: str, owned: tuple[set, dict]) -> list[dict]:
     """This account's requests, each with its current state.
 
-    Arrival is a set membership test against the ASINs already on disk, which
-    the engine builds on every run anyway. There is no status to fetch from
-    Listenarr and nothing to poll: a book has either reached the library or it
-    has not.
+    `owned` is the library index -- ASINs, and normalised titles to author sets
+    -- which the engine builds on every run anyway. There is still no status to
+    fetch from Listenarr and nothing to poll: a book has either reached the
+    library or it has not.
     """
+    asins, by_title = owned
     rows = store.requests_for(user_key)
     arrived = {r["asin"] for r in rows
-               if r["fulfilled_at"] is None and r["asin"] in owned_asins}
+               if r["fulfilled_at"] is None and _arrived(r, asins, by_title)}
     if arrived:
         log.info("requests fulfilled user=%s asins=%s", user_key, sorted(arrived))
     store.fulfil_requests(user_key, arrived)
@@ -113,6 +117,35 @@ def states(user_key: str, owned_asins: set) -> list[dict]:
             "state": _state(row),
         })
     return out
+
+
+def _arrived(row: dict, asins: set, by_title: dict) -> bool:
+    """Whether the book behind one request is now in the library.
+
+    NOT an ASIN test, though it was one until 2026-08-28 and every request made
+    through the app was stuck at "on its way" because of it. The ASIN asked for
+    belongs to whichever marketplace the book was found in, and the tagger
+    writes the one the other store issued for the same edition: "Splinter Angel:
+    Book 1" was asked for as B0FMS8SNXH and sits in the library as B0FMS7YS1C.
+    The two never meet, so the request could never be fulfilled.
+
+    Close to `engine._already_owned` and deliberately not that call. That one
+    asks "is this suggestion already on the shelf" of forty candidates against
+    the whole library, where a bare title match over-suppresses and an author
+    must agree. Here the title is the one that was asked for by name, so a title
+    match is the evidence and an author is a guard on it -- applied when both
+    sides carry one, which a row written before authors were kept does not.
+    """
+    if row["asin"] in asins:
+        return True
+    wanted = {engine._norm_author(a) for a in row.get("authors") or []}
+    for key in engine._title_keys(row.get("title") or ""):
+        if key not in by_title:
+            continue
+        owners = by_title[key]
+        if not owners or not wanted or (wanted & owners):
+            return True
+    return False
 
 
 def _request_row(user_key: str, asin: str) -> dict | None:

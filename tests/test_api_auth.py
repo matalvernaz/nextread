@@ -10,11 +10,13 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
-os.environ.setdefault("DB_PATH", "/tmp/nextread-test-api.db")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-if os.path.exists(os.environ["DB_PATH"]):
-    os.remove(os.environ["DB_PATH"])
+from tests import harness
+
+DB_PATH = harness.use("api")
+
+harness.discard(DB_PATH)
 
 from fastapi.testclient import TestClient
 
@@ -41,7 +43,7 @@ def fake_introspect(token: str) -> jellyfin.User:
 jellyfin.user_from_token = fake_introspect
 jellyfin.library_ids = lambda: ["lib-audio", "lib-graphic"]
 shelves.engine.run = lambda user, update_playlist=True: {
-    "user_name": user.name, "own": [], "discover": [], "owned_asins": set(),
+    "user_name": user.name, "own": [], "discover": [], "owned_index": (set(), {}),
     "playlist_name": "Next Read",
 }
 listenarr.add = lambda asin, monitored=True: listenarr.AddResult(True, "Sent", 1)
@@ -122,5 +124,5 @@ shelves.invalidate()
 assert client.get("/api/v1/shelves", headers=auth("matt-token")).status_code == 200
 assert written == [], "the API's shelf read must not write a playlist"
 
-os.remove(os.environ["DB_PATH"])
+harness.discard(DB_PATH)
 print("api auth checks passed")

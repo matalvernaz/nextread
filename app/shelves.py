@@ -44,10 +44,21 @@ def owned_index(user: jellyfin.User) -> tuple[set, dict]:
         entry = _owned_cache.get(user.key)
         if entry and time.monotonic() - entry[0] <= OWNED_TTL_SECONDS:
             return entry[1]
-    index = engine._owned_index(jellyfin.books(jellyfin.user_id(user.name)))
-    with _cache_guard:
-        _owned_cache[user.key] = (time.monotonic(), index)
+    index = engine._owned_index(jellyfin.books(user.id))
+    _publish_owned(user.key, index)
     return index
+
+
+def _publish_owned(user_key: str, index: tuple[set, dict]) -> None:
+    """Make an index somebody has just built available to the next reader.
+
+    A shelf build lists the library and derives this on the way past. Without
+    this the next caller to want it -- a search, or the arrival check on this
+    account's requests -- lists all 3,352 books again to derive the same thing,
+    in front of whoever opened the screen.
+    """
+    with _cache_guard:
+        _owned_cache[user_key] = (time.monotonic(), index)
 
 
 def _lock_for(user_key: str) -> Lock:
@@ -151,6 +162,9 @@ def result(user: jellyfin.User, force: bool = False,
                  user.key, force, update_playlist)
         started = time.monotonic()
         data = engine.run(user, update_playlist=update_playlist)
+        # Popped before the shelf is cached or persisted: it is larger than the
+        # shelf itself, and its sets do not survive a JSON round trip.
+        _publish_owned(user.key, data.pop("owned_index"))
         with _cache_guard:
             _cache[user.key] = (time.monotonic(), data, update_playlist)
         # Written after the memory cache, so a failure to persist costs the next

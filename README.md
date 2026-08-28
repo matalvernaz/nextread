@@ -110,13 +110,20 @@ rather than fetched:
 |---|---|
 | `on_its_way` | asked for, not yet on disk |
 | `still_looking` | waiting longer than `STILL_LOOKING_AFTER_HOURS`. Not a failure: the book stays monitored and keeps being retried |
-| `in_library` | its ASIN is now among the library's, so it is an ordinary item |
+| `in_library` | the book is now on disk, so it is an ordinary item |
 
-Arrival is a set-membership test against the ASINs already on disk, which the
-engine builds on every run anyway. There is no status to poll and nothing to
-subscribe to. It follows that the round trip depends on the imported file
-carrying its Audible ASIN through to Jellyfin -- if that tag is lost, a book
-arrives and its row stays `still_looking` for ever.
+Arrival is decided against the library index the engine builds on every run
+anyway -- the ASINs on disk, and normalised titles to author sets. There is no
+status to poll and nothing to subscribe to.
+
+**It is not an ASIN test, and was one until 2026-08-28.** The ASIN asked for
+belongs to whichever marketplace the book was found in, and the tagger writes
+the one the other store issues for the same edition: "Splinter Angel: Book 1"
+was asked for as `B0FMS8SNXH` and sits in the library as `B0FMS7YS1C`. Under an
+ASIN-only test the two never met, so every request made through the app stayed
+at `on_its_way` while the book played from the library. The title decides now,
+guarded by an author where both sides carry one -- the same allowance
+`engine._already_owned` already made for editions differing by subtitle.
 
 `WANT_DAILY_CAP` bounds how many books a non-keyholder may request per rolling
 day; Jellyfin administrators are not capped. It exists because opening requests
@@ -272,6 +279,21 @@ Confirm you have not shadowed anything of Jellyfin's either:
 Deriving the address rather than storing one also keeps the traffic on
 whichever route the client is already using, so a client on the same LAN as the
 server does not leave the network to reach this.
+
+## Tests
+
+Run them against the image, with **no `/data` mounted**:
+
+    docker run --rm -v /tmp/nrt:/work -w /work nextread:local \
+        bash -c 'for t in tests/test_*.py; do python "$t" || exit 1; done'
+
+The dependencies exist only in the container, and that container's environment
+sets `DB_PATH` to the live database. The files used to say
+`os.environ.setdefault("DB_PATH", ...)`, which defers to exactly that, so on
+2026-08-28 the suite ran against production and deleted it on the way out.
+`tests/harness.py` now sets the path rather than defaulting it and refuses to
+delete anything not named `nextread-test-*`; leaving the volume off as well
+means the question cannot arise.
 
 ## Deploy
 

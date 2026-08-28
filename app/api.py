@@ -119,7 +119,10 @@ def get_shelves(user: jellyfin.User = Depends(caller)) -> dict:
         "owned": [{"id": row["id"], "title": row["title"], "reason": row["why"]}
                   for row in data["own"]],
         "suggestions": [_suggestion(row) for row in data["discover"]],
-        "requests": wants.states(user.key, data["owned_asins"]),
+        # The index rather than the shelf's own view of what is owned: a book
+        # arrives under the ASIN the other marketplace issued for it, so
+        # arrival is decided on title and author too.
+        "requests": wants.states(user.key, shelves.owned_index(user)),
     }
 
 

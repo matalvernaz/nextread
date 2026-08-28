@@ -60,7 +60,8 @@ calls = []
 real_run = shelves.engine.run
 shelves.engine.run = (
     lambda user, update_playlist=True:
-    calls.append(user.key) or {"user_name": user.name, "own": []})
+    calls.append(user.key) or {
+        "user_name": user.name, "own": [], "owned_index": (set(), {})})
 shelves.invalidate()
 try:
     assert shelves.result(matt)["user_name"] == "matt"
@@ -88,6 +89,7 @@ shelves.engine.run = (
         "own": [{"id": "item-1"}],
         "playlist_name": "Next Read",
         "discover": [],
+        "owned_index": (set(), {}),
     })
 shelves.jellyfin.set_playlist = (
     lambda uid, name, ids: written.append((uid, name, tuple(ids))) or "playlist-1")

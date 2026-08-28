@@ -11,8 +11,11 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
-os.environ.setdefault("DB_PATH", "/tmp/nextread-test-region.db")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import harness
+
+DB_PATH = harness.use("region")
 
 from app import audible, config, engine
 
