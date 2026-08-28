@@ -5,11 +5,13 @@ import time
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
-os.environ.setdefault("DB_PATH", "/tmp/nextread-test-wants.db")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-if os.path.exists(os.environ["DB_PATH"]):
-    os.remove(os.environ["DB_PATH"])
+from tests import harness
+
+DB_PATH = harness.use("wants")
+
+harness.discard(DB_PATH)
 
 from app import config, jellyfin, listenarr, store, wants
 
@@ -133,5 +135,5 @@ wants.dismiss(kadija, "PERSONAL")
 assert "PERSONAL" in store.suppressed_asins(kadija.key)
 assert "PERSONAL" not in store.suppressed_asins("someone-else")
 
-os.remove(os.environ["DB_PATH"])
+harness.discard(DB_PATH)
 print("want path checks passed")

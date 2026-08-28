@@ -12,11 +12,13 @@ import time
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
-os.environ.setdefault("DB_PATH", "/tmp/nextread-test-persist.db")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-if os.path.exists(os.environ["DB_PATH"]):
-    os.remove(os.environ["DB_PATH"])
+from tests import harness
+
+DB_PATH = harness.use("persist")
+
+harness.discard(DB_PATH)
 
 from app import engine, jellyfin, shelves, store
 

@@ -12,8 +12,11 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
-os.environ.setdefault("DB_PATH", "/tmp/nextread-test-asin.db")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import harness
+
+DB_PATH = harness.use("asin")
 
 from app import listenarr
 

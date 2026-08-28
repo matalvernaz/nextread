@@ -280,6 +280,21 @@ Deriving the address rather than storing one also keeps the traffic on
 whichever route the client is already using, so a client on the same LAN as the
 server does not leave the network to reach this.
 
+## Tests
+
+Run them against the image, with **no `/data` mounted**:
+
+    docker run --rm -v /tmp/nrt:/work -w /work nextread:local \
+        bash -c 'for t in tests/test_*.py; do python "$t" || exit 1; done'
+
+The dependencies exist only in the container, and that container's environment
+sets `DB_PATH` to the live database. The files used to say
+`os.environ.setdefault("DB_PATH", ...)`, which defers to exactly that, so on
+2026-08-28 the suite ran against production and deleted it on the way out.
+`tests/harness.py` now sets the path rather than defaulting it and refuses to
+delete anything not named `nextread-test-*`; leaving the volume off as well
+means the question cannot arise.
+
 ## Deploy
 
 Stack lives at `/opt/stacks/nextread` inside the `dockge` Incus container.
