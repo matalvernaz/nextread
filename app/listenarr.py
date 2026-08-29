@@ -61,6 +61,45 @@ def _names(values) -> list[str]:
     return out
 
 
+def _series_payload(values) -> tuple[dict, list[dict]]:
+    """Return the primary series and every membership in Listenarr's add shape.
+
+    Audible can put an unnumbered franchise label before the numbered sequence
+    the book actually belongs to. The numbered membership is the useful filing
+    coordinate; when none has a position, preserving the provider's first one
+    is the only non-arbitrary fallback.
+    """
+    entries = []
+    for value in values or []:
+        name = (value.get("name") or value.get("title") or "").strip()
+        if not name:
+            continue
+        number = value.get("position")
+        if number is None:
+            number = value.get("sequence")
+        entries.append((value, name, number))
+
+    if not entries:
+        return {}, []
+
+    primary_index = next(
+        (index for index, (_, _, number) in enumerate(entries)
+         if number is not None and str(number).strip()),
+        0,
+    )
+    memberships = [
+        {
+            "seriesName": name,
+            "seriesNumber": number,
+            "seriesAsin": value.get("asin"),
+            "isPrimary": index == primary_index,
+            "sortOrder": index,
+        }
+        for index, (value, name, number) in enumerate(entries)
+    ]
+    return memberships[primary_index], memberships
+
+
 def _to_add_metadata(result: dict, region: str | None = None) -> dict:
     """Map a search result onto `AudibleBookMetadata`.
 
@@ -70,7 +109,7 @@ def _to_add_metadata(result: dict, region: str | None = None) -> dict:
     shape straight through fails deserialisation, which surfaces as a misleading
     `400 The request field is required` rather than a field-level error.
     """
-    series = (result.get("series") or [{}])[0] if result.get("series") else {}
+    series, series_memberships = _series_payload(result.get("series"))
     release = result.get("releaseDate") or ""
     return {
         "asin": result.get("asin"),
@@ -88,19 +127,9 @@ def _to_add_metadata(result: dict, region: str | None = None) -> dict:
         "publisher": result.get("publisher"),
         "publishedDate": release or None,
         "publishYear": release[:4] or None,
-        "series": series.get("name"),
-        "seriesNumber": series.get("position"),
-        "seriesMemberships": [
-            {
-                "seriesName": s.get("name"),
-                "seriesNumber": s.get("position"),
-                "seriesAsin": s.get("asin"),
-                "isPrimary": idx == 0,
-                "sortOrder": idx,
-            }
-            for idx, s in enumerate(result.get("series") or [])
-            if s.get("name")
-        ],
+        "series": series.get("seriesName"),
+        "seriesNumber": series.get("seriesNumber"),
+        "seriesMemberships": series_memberships,
         "runtime": result.get("lengthMinutes"),
         "bookFormat": result.get("bookFormat"),
     }
@@ -189,7 +218,7 @@ def _from_audible_product(asin: str) -> dict | None:
     title = (found.get("title") or "").strip()
     if not title:
         return None
-    series = (found.get("series") or [{}])[0] if found.get("series") else {}
+    series, series_memberships = _series_payload(found.get("series"))
     release = found.get("release_date") or ""
     runtime = found.get("runtime_length_min")
     return {
@@ -205,9 +234,9 @@ def _from_audible_product(asin: str) -> dict | None:
         "publisher": found.get("publisher_name"),
         "publishedDate": release or None,
         "publishYear": release[:4] or None,
-        "series": series.get("title") or series.get("name"),
-        "seriesNumber": series.get("sequence"),
-        "seriesMemberships": [],
+        "series": series.get("seriesName"),
+        "seriesNumber": series.get("seriesNumber"),
+        "seriesMemberships": series_memberships,
         "runtime": runtime * 60 if isinstance(runtime, int) else None,
     }
 
