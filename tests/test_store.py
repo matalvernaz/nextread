@@ -3,13 +3,13 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import config, store
-
 
 with tempfile.TemporaryDirectory() as tmp:
     config.DB_PATH = str(Path(tmp) / "nextread.db")
@@ -41,6 +41,11 @@ with tempfile.TemporaryDirectory() as tmp:
 
     store.init()
 
+    # The migrated dismissal is made current so this test can distinguish user
+    # scoping from the separate expiry behaviour below.
+    with store.db() as conn:
+        conn.execute("UPDATE dismissed SET dismissed_at=?", (time.time(),))
+
     db = sqlite3.connect(config.DB_PATH)
     assert db.execute("SELECT user_key FROM submitted").fetchone()[0] == "matt"
     assert db.execute("SELECT user_key FROM dismissed").fetchone()[0] == "matt"
@@ -54,9 +59,77 @@ with tempfile.TemporaryDirectory() as tmp:
     assert store.suppressed_asins("alex") == {"GLOBAL", "ALEX-HIDDEN"}
     assert "ALEX-HIDDEN" not in store.suppressed_asins("matt")
 
+    with store.db() as conn:
+        conn.execute(
+            "UPDATE dismissed SET dismissed_at=? WHERE user_key=? AND asin=?",
+            (time.time() - (config.DISMISS_TTL_DAYS + 1) * 86400,
+             "alex", "ALEX-HIDDEN"),
+        )
+    assert "ALEX-HIDDEN" not in store.suppressed_asins("alex"), \
+        "a dismissal must expire rather than suppress a book forever"
+
+    store.dismiss("alex", "UNDO-ME")
+    assert store.undismiss("alex", "UNDO-ME")
+    assert "UNDO-ME" not in store.suppressed_asins("alex")
+
     run_id = store.start_run("alex")
     store.finish_run(run_id, 1, 2, 3, "alex-run")
     assert store.last_run("alex")["note"] == "alex-run"
     assert store.last_run("matt")["note"] == "legacy"
+
+    recommendation = {
+        "asin": "ATTRIBUTED",
+        "score": 42,
+        "source": "audible_sims",
+        "why": ["because"],
+        "recommendation_id": f"{run_id}:discover:1:ATTRIBUTED",
+    }
+    store.record_recommendations(
+        run_id, "alex", "discover", [recommendation], "2")
+    store.record_feedback(
+        "alex", "ATTRIBUTED", "want", recommendation["recommendation_id"])
+    store.record_feedback(
+        "matt", "ATTRIBUTED", "dismiss", recommendation["recommendation_id"])
+    with store.db() as conn:
+        events = conn.execute(
+            "SELECT user_key,recommendation_id FROM feedback_events ORDER BY id"
+        ).fetchall()
+    assert events[-2]["recommendation_id"] == recommendation["recommendation_id"]
+    assert events[-1]["recommendation_id"] is None, \
+        "another account must not be able to forge attribution"
+
+    old = time.time() - (config.ATTRIBUTION_RETENTION_DAYS + 1) * 86400
+    with store.db() as conn:
+        conn.execute(
+            "UPDATE recommendation_items SET created_at=? "
+            "WHERE recommendation_id=?",
+            (old, recommendation["recommendation_id"]),
+        )
+    store.prune_attribution()
+    with store.db() as conn:
+        snapshot = conn.execute(
+            "SELECT 1 FROM recommendation_items WHERE recommendation_id=?",
+            (recommendation["recommendation_id"],),
+        ).fetchone()
+    assert snapshot is not None, \
+        "a snapshot must survive while retained feedback still points to it"
+
+    with store.db() as conn:
+        conn.execute(
+            "UPDATE feedback_events SET occurred_at=? WHERE recommendation_id=?",
+            (old, recommendation["recommendation_id"]),
+        )
+    store.prune_attribution()
+    with store.db() as conn:
+        event = conn.execute(
+            "SELECT 1 FROM feedback_events WHERE recommendation_id=?",
+            (recommendation["recommendation_id"],),
+        ).fetchone()
+        snapshot = conn.execute(
+            "SELECT 1 FROM recommendation_items WHERE recommendation_id=?",
+            (recommendation["recommendation_id"],),
+        ).fetchone()
+    assert event is None and snapshot is None, \
+        "expired feedback must release its old snapshot"
 
 print("store migration and isolation checks passed")

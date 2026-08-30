@@ -120,6 +120,93 @@ rows = [
 check("the exact volume wins over a shared subtitle-stripped key",
       engine._matching_audible_asin(seed, rows), "part-three")
 
+print("--- ASIN-less seeds resolve through title and author ---")
+asinless = item("no-asin", name="Demon World Boba Shop")
+asinless["People"] = [{"Type": "Author", "Name": "RC Joshua"}]
+saved_sims = engine.audible.sims
+saved_search = engine.listenarr.audible_search
+saved_get_alias = engine.store.get_audible_alias
+saved_put_alias = engine.store.put_audible_alias
+aliases = []
+try:
+    engine.audible.sims = lambda asin: (
+        [{"asin": "NEIGHBOUR", "title": "A Neighbour"}]
+        if asin == "RESOLVED" else [])
+    engine.listenarr.audible_search = lambda query: [{
+        "asin": "RESOLVED",
+        "title": "Demon World Boba Shop",
+        "authors": [{"name": "R. C. Joshua"}],
+    }]
+    engine.store.get_audible_alias = lambda source: None
+    engine.store.put_audible_alias = lambda source, asin: aliases.append((source, asin))
+    resolved_sims = engine._seed_sims(asinless)
+finally:
+    engine.audible.sims = saved_sims
+    engine.listenarr.audible_search = saved_search
+    engine.store.get_audible_alias = saved_get_alias
+    engine.store.put_audible_alias = saved_put_alias
+check("the missing identifier no longer drops the seed", resolved_sims[0]["asin"],
+      "NEIGHBOUR")
+check("the resolved edition is cached against the Jellyfin item",
+      aliases, [("item:no-asin", "RESOLVED")])
+
+print("--- series sequencing exposes one immediate next volume ---")
+volume_one = item("v1", played=True, name="Book One")
+volume_two = item("v2", played=False, name="Book Two")
+volume_three = item("v3", played=False, name="Book Three")
+for position, volume in enumerate((volume_one, volume_two, volume_three), start=1):
+    volume["SeriesName"] = "One Series"
+    volume["IndexNumber"] = position
+next_ids, blocked_ids = engine._series_plan(
+    [volume_one, volume_two, volume_three])
+check("only volume two is next", next_ids, {"v2"})
+check("volume three is withheld", blocked_ids, {"v3"})
+volume_two["UserData"]["PlayedPercentage"] = 25.0
+next_ids, blocked_ids = engine._series_plan(
+    [volume_one, volume_two, volume_three])
+check("a partial volume remains current", next_ids, set())
+check("later volumes stay withheld while it is current", blocked_ids, {"v2", "v3"})
+next_ids, blocked_ids = engine._series_plan([volume_one, volume_three])
+check("a missing volume is not skipped over", next_ids, set())
+check("the later owned volume stays withheld", blocked_ids, {"v3"})
+
+volume_two["UserData"]["PlayedPercentage"] = 25.0
+volume_three["UserData"]["Played"] = True
+volume_four = item("v4", played=False, name="Book Four")
+volume_four["SeriesName"] = "One Series"
+volume_four["IndexNumber"] = 4
+out_of_order = [volume_one, volume_two, volume_three, volume_four]
+next_ids, blocked_ids = engine._series_plan(out_of_order)
+check("a later completion does not leapfrog the current volume", next_ids, set())
+check_true("everything after the partial volume waits",
+           {"v2", "v3", "v4"} <= blocked_ids, blocked_ids)
+check("the discover frontier also stops before the partial volume",
+      engine._series_frontiers(out_of_order), {"One Series": 1.0})
+
+stale_one = item("stale-1", played=False, name="Stale One")
+proven_two = item("proven-2", played=True, name="Proven Two")
+proven_three = item("proven-3", played=True, name="Proven Three")
+proven_four = item("proven-4", played=False, name="Proven Four")
+for position, volume in enumerate(
+    (stale_one, proven_two, proven_three, proven_four), start=1
+):
+    volume["SeriesName"] = "Imported Series"
+    volume["IndexNumber"] = position
+next_ids, _ = engine._series_plan(
+    [stale_one, proven_two, proven_three, proven_four])
+check("zero progress does not erase later proven completion",
+      next_ids, {"proven-4"})
+
+fresh_one = item("fresh-1", played=False, name="Fresh One")
+fresh_two = item("fresh-2", played=False, name="Fresh Two")
+for position, volume in enumerate((fresh_one, fresh_two), start=1):
+    volume["SeriesName"] = "Fresh Series"
+    volume["IndexNumber"] = position
+next_ids, blocked_ids = engine._series_plan([fresh_one, fresh_two])
+check("an unread series makes no false next-volume claim", next_ids, set())
+check("an unread series can offer book one but not book two",
+      blocked_ids, {"fresh-2"})
+
 print("--- Audible votes carry the seed's weight ---")
 cand = {"asin": "candidate", "authors": [], "narrators": []}
 score, why = engine._score_candidate(
@@ -133,6 +220,10 @@ check("a quarter-strength seed casts a quarter vote",
       score, engine.W_SIMS_VOTE * 0.25)
 check_true("the reason names the actual source title",
            "A Quarter-Listened Seed" in why[0], why[0])
+check("the first Audible neighbour keeps a full vote",
+      engine._similarity_vote(1.0, 1), 1.0)
+check_true("the tenth neighbour is weaker than the first",
+           engine._similarity_vote(1.0, 10) < engine._similarity_vote(1.0, 1))
 
 affinity_cand = {
     "asin": "affinity", "authors": ["Partial Author"],
@@ -147,6 +238,84 @@ affinity_score, _ = engine._score_candidate(
 )
 check("author and narrator bonuses retain their affinity weights",
       affinity_score, engine.W_AUTHOR * 0.25 + engine.W_NARRATOR * 0.5)
+
+canonical_score, canonical_why = engine._score_candidate(
+    {"asin": "canonical", "authors": ["RC Joshua"], "narrators": []},
+    {"authors": {"R. C. Joshua": 1.0}, "narrators": {}},
+    {},
+    0.0,
+)
+check("author affinity uses the same initials normalisation as ownership",
+      canonical_score, engine.W_AUTHOR)
+check_true("the canonical match is explainable", "RC Joshua" in canonical_why[0])
+
+saturated_score, _ = engine._score_candidate(
+    {"asin": "saturated", "authors": ["Prolific Author"], "narrators": []},
+    {"authors": {"Prolific Author": 50.0}, "narrators": {}},
+    {},
+    0.0,
+)
+check("a prolific author cannot grow without bound", saturated_score,
+      engine.W_AUTHOR * engine.MAX_AFFINITY_WEIGHT)
+
+owned = item("owned", played=False, name="Owned Candidate")
+owned["ProviderIds"] = {"Audible": "OWNED"}
+owned["Genres"] = ["Science Fiction & Fantasy"]
+owned_score, owned_why = engine._score_owned(
+    owned,
+    {"authors": {}, "narrators": {},
+     "genres": {"Science Fiction & Fantasy": 3}, "series_next": set()},
+    {"OWNED": 1},
+    0.0,
+    ["A Real Source"],
+)
+check_true("owned Audible reasons name their source book",
+           "A Real Source" in owned_why[0], owned_why[0])
+check_true("a broad catalogue category is not presented as an explanation",
+           all("Science Fiction" not in reason for reason in owned_why), owned_why)
+
+print("--- diversity protects the top of a ranked shelf ---")
+clustered = [
+    {"asin": "a1", "title": "A1", "authors": ["Same"], "series": "Saga", "score": 10},
+    {"asin": "a2", "title": "A2", "authors": ["Same"], "series": "Saga", "score": 9},
+    {"asin": "a3", "title": "A3", "authors": ["Same"], "series": "Saga", "score": 8},
+    {"asin": "b1", "title": "B1", "authors": ["Other"], "series": "Other", "score": 7},
+]
+diverse = engine._diversify(clustered, 4)
+check("another series reaches the top before the cluster repeats",
+      [row["asin"] for row in diverse[:2]], ["a1", "b1"])
+
+print("--- editions and reading order are shelf invariants ---")
+editions = engine._dedupe_works([
+    {"asin": "CA", "title": "A Fine Book: An Audiobook", "authors": ["A. Writer"],
+     "score": 8},
+    {"asin": "US", "title": "A Fine Book", "authors": ["A Writer"], "score": 10},
+    {"asin": "OTHER", "title": "A Fine Book", "authors": ["Someone Else"],
+     "score": 9},
+])
+check("alternate editions consume one slot", sorted(row["asin"] for row in editions),
+      ["OTHER", "US"])
+separate_volumes = engine._dedupe_works([
+    {"asin": "ONE", "title": "Shared Saga: Book One", "authors": ["A. Writer"],
+     "score": 10},
+    {"asin": "TWO", "title": "Shared Saga: Book Two", "authors": ["A. Writer"],
+     "score": 9},
+])
+check("a shared subtitle head does not collapse distinct volumes",
+      sorted(row["asin"] for row in separate_volumes), ["ONE", "TWO"])
+reading_taste = {"series": {"Known Saga": 2.0}}
+check("a series may start at book one",
+      engine._is_reading_order_candidate(
+          {"series": "Unknown Saga", "series_position": "1"}, reading_taste), True)
+check("an unfamiliar sequel is rejected",
+      engine._is_reading_order_candidate(
+          {"series": "Unknown Saga", "series_position": "6"}, reading_taste), False)
+check("the immediate next known volume is eligible",
+      engine._is_reading_order_candidate(
+          {"series": "Known Saga", "series_position": "3"}, reading_taste), True)
+check("a future known volume still skips too far",
+      engine._is_reading_order_candidate(
+          {"series": "Known Saga", "series_position": "4"}, reading_taste), False)
 
 print("--- disliked books must not lend their author any affinity ---")
 liked = item("liked", 9, name="Good One")

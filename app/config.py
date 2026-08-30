@@ -127,6 +127,17 @@ KEYWORD_PULL_ENABLED = os.environ.get("KEYWORD_PULL_ENABLED", "false").lower() =
 KEYWORD_QUERIES_MAX = int(os.environ.get("KEYWORD_QUERIES_MAX", "4"))
 KEYWORD_SHELF_SHARE = float(os.environ.get("KEYWORD_SHELF_SHARE", "0.25"))
 
+# A dismissal means "not now", not an irreversible judgement. Taste changes,
+# editions change, and an accidental tap must not suppress a book forever.
+DISMISS_TTL_DAYS = int(os.environ.get("DISMISS_TTL_DAYS", "30"))
+
+# Recommendation snapshots make requests and dismissals attributable to the
+# ranker run that produced them. Kept long enough to compare outcomes across a
+# few release cycles without turning this small SQLite database into a ledger
+# with no bound.
+ATTRIBUTION_RETENTION_DAYS = int(
+    os.environ.get("ATTRIBUTION_RETENTION_DAYS", "180"))
+
 
 # --- Requests: acquiring a book somebody asked for ---------------------------
 

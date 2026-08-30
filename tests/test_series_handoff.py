@@ -53,6 +53,18 @@ unnumbered = listenarr._to_add_metadata({
 check("first series remains fallback when none is numbered",
       unnumbered["series"], "First")
 
+thin = audible._thin({
+    "asin": "B0THIN",
+    "title": "Annihilation",
+    "series": [
+        {"title": "Star Wars: Legends"},
+        {"title": "Star Wars: The Old Republic - Legends", "sequence": "4"},
+    ],
+})
+check("sims retain the numbered series",
+      thin["series"], "Star Wars: The Old Republic - Legends")
+check("sims retain the series position", thin["series_position"], "4")
+
 saved_product = audible.product
 try:
     audible.product = lambda asin: {

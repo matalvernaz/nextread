@@ -43,7 +43,7 @@ def _has_product(payload) -> bool:
     404, so the absence is silent and only the missing title gives it away.
     """
     return bool(payload) and bool((payload.get("title") or "").strip())
-_RESPONSE_GROUPS = "product_desc,contributors,product_attrs,media"
+_RESPONSE_GROUPS = "product_desc,contributors,product_attrs,media,series"
 
 # One book at a time can afford the long blurb, and a shelf of neighbours cannot.
 #
@@ -59,7 +59,7 @@ _RESPONSE_GROUPS = "product_desc,contributors,product_attrs,media"
 # fetches ten neighbours per seed across twenty seeds, and the long blurb is
 # several times the payload for text no shelf row displays.
 _PRODUCT_RESPONSE_GROUPS = (
-    "contributors,product_attrs,product_desc,product_extended_attrs,media")
+    "contributors,product_attrs,product_desc,product_extended_attrs,media,series")
 _TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
 # Audible honours `similarity_type` and each value returns a genuinely different
@@ -73,6 +73,23 @@ AXIS_NARRATOR = "ByTheSameNarrator"
 AXIS_SERIES = "InTheSameSeries"
 
 
+def _primary_series(product: dict) -> tuple[str | None, str | None]:
+    """The numbered series when Audible lists both a franchise and a sequence."""
+    memberships = product.get("series") or []
+    if not memberships:
+        return None, None
+    primary = next(
+        (row for row in memberships
+         if row.get("sequence") is not None or row.get("position") is not None),
+        memberships[0],
+    )
+    name = (primary.get("title") or primary.get("name") or "").strip() or None
+    position = primary.get("sequence")
+    if position is None:
+        position = primary.get("position")
+    return name, str(position) if position is not None else None
+
+
 def _thin(product: dict) -> dict:
     """Keep only what the shelf needs. Full payloads are large and mostly noise.
 
@@ -80,6 +97,7 @@ def _thin(product: dict) -> dict:
     no text, so the rating-driven text model could only ever re-rank books
     already on disk -- which is the half of the promise that matters least.
     """
+    series, series_position = _primary_series(product)
     return {
         "asin": product.get("asin"),
         "title": (product.get("title") or "").strip(),
@@ -89,8 +107,10 @@ def _thin(product: dict) -> dict:
         "runtime_min": product.get("runtime_length_min"),
         "release_date": product.get("release_date"),
         "publisher": product.get("publisher_name"),
-        "description": (product.get("merchandising_summary")
-                        or product.get("publisher_summary") or "").strip(),
+        "series": series,
+        "series_position": series_position,
+        "description": (product.get("publisher_summary")
+                        or product.get("merchandising_summary") or "").strip(),
     }
 
 

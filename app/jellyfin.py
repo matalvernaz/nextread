@@ -180,13 +180,17 @@ def find_playlist(uid: str, name: str) -> str | None:
     return None
 
 
-def set_playlist(uid: str, name: str, item_ids: list[str]) -> str:
+def set_playlist(uid: str, name: str, item_ids: list[str]) -> str | None:
     """Create or update a playlist in place so its id survives between runs.
 
     A playlist (not a collection) because collections are server-global and this
     server has six users -- recommendations are per-person.
     """
     pid = find_playlist(uid, name)
+    # An empty first result has nothing to create. An existing playlist still
+    # has to be cleared below, or stale recommendations survive indefinitely.
+    if pid is None and not item_ids:
+        return None
     with _client() as c:
         if pid is None:
             body = {"Name": name, "Ids": item_ids, "UserId": uid, "MediaType": "Audio"}

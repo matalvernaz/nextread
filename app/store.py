@@ -13,7 +13,7 @@ from . import config
 # Bumped whenever the shape of a cached sims payload changes. A stale entry is
 # worse than a miss: it looks fresh and silently scores zero on fields that were
 # not being kept when it was written.
-SIMS_SCHEMA_VERSION = 3
+SIMS_SCHEMA_VERSION = 4
 
 # The same idea for cached Audible products, versioned apart from sims so a
 # reshaped product does not throw away a similarity graph that costs one request
@@ -21,7 +21,7 @@ SIMS_SCHEMA_VERSION = 3
 # `product_extended_attrs` was asked for, so none of them carries
 # `publisher_summary` at all, and `PRODUCT_TTL_HOURS` would go on serving the
 # teaser in its place for a month after the fix landed.
-PRODUCTS_SCHEMA_VERSION = 2
+PRODUCTS_SCHEMA_VERSION = 3
 
 _SUBMITTED_SCHEMA = """
 CREATE TABLE IF NOT EXISTS submitted (
@@ -66,6 +66,41 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 """
 
+_RECOMMENDATIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS recommendation_items (
+    recommendation_id TEXT PRIMARY KEY,
+    run_id            INTEGER NOT NULL,
+    user_key          TEXT NOT NULL,
+    surface           TEXT NOT NULL,
+    item_key          TEXT NOT NULL,
+    rank              INTEGER NOT NULL,
+    score             REAL NOT NULL,
+    source            TEXT NOT NULL,
+    reasons           TEXT NOT NULL,
+    ranker_version    TEXT NOT NULL,
+    created_at        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recommendation_items_user_run
+    ON recommendation_items(user_key, run_id);
+CREATE INDEX IF NOT EXISTS recommendation_items_created
+    ON recommendation_items(created_at);
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_key          TEXT NOT NULL,
+    asin              TEXT NOT NULL,
+    action            TEXT NOT NULL,
+    recommendation_id TEXT,
+    occurred_at       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS feedback_events_user_time
+    ON feedback_events(user_key, occurred_at);
+CREATE INDEX IF NOT EXISTS feedback_events_time
+    ON feedback_events(occurred_at);
+CREATE INDEX IF NOT EXISTS feedback_events_recommendation
+    ON feedback_events(recommendation_id);
+"""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key         TEXT PRIMARY KEY,
@@ -97,7 +132,8 @@ CREATE TABLE IF NOT EXISTS doc_vectors (
     payload     TEXT NOT NULL,
     built_at    REAL NOT NULL
 );
-""" + _SUBMITTED_SCHEMA + _REQUESTS_SCHEMA + _DISMISSED_SCHEMA + _RUNS_SCHEMA
+""" + _SUBMITTED_SCHEMA + _REQUESTS_SCHEMA + _DISMISSED_SCHEMA + _RUNS_SCHEMA \
+    + _RECOMMENDATIONS_SCHEMA
 
 
 @contextmanager
@@ -316,7 +352,7 @@ def put_sims(asin: str, axis: str, payload) -> None:
 
 
 def get_audible_alias(source_asin: str) -> str | None:
-    """A recently resolved audiobook ASIN for a dead library identifier."""
+    """A recent resolution, empty string for a known miss, or None when stale."""
     cutoff = time.time() - config.SIMS_TTL_HOURS * 3600
     with db() as conn:
         row = conn.execute(
@@ -455,6 +491,14 @@ def dismiss(user_key: str, asin: str) -> None:
         )
 
 
+def undismiss(user_key: str, asin: str) -> bool:
+    """Remove this account's active dismissal. True when one existed."""
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM dismissed WHERE user_key=? AND asin=?", (user_key, asin))
+    return cur.rowcount > 0
+
+
 def suppressed_asins(user_key: str) -> set:
     """Global acquisitions plus books dismissed by this user.
 
@@ -462,12 +506,90 @@ def suppressed_asins(user_key: str) -> set:
     Listenarr is shared, so a book one listener asks for is acquired once and
     should not still be offered to the other nine as if it were unowned.
     """
+    dismissal_cutoff = time.time() - config.DISMISS_TTL_DAYS * 86400
     with db() as conn:
         rows = conn.execute(
-            "SELECT asin FROM requests UNION SELECT asin FROM dismissed WHERE user_key=?",
-            (user_key,),
+            "SELECT asin FROM requests UNION SELECT asin FROM dismissed "
+            "WHERE user_key=? AND dismissed_at>?",
+            (user_key, dismissal_cutoff),
         ).fetchall()
     return {r["asin"] for r in rows}
+
+
+def record_recommendations(
+    run_id: int,
+    user_key: str,
+    surface: str,
+    rows: list[dict],
+    ranker_version: str,
+) -> None:
+    """Persist the ranked rows needed to attribute later feedback."""
+    now = time.time()
+    values = []
+    for rank, row in enumerate(rows, start=1):
+        recommendation_id = row.get("recommendation_id")
+        item_key = row.get("id") if surface == "owned" else row.get("asin")
+        if not recommendation_id or not item_key:
+            continue
+        values.append((
+            recommendation_id,
+            run_id,
+            user_key,
+            surface,
+            item_key,
+            rank,
+            float(row.get("score") or 0),
+            row.get("source") or "unknown",
+            json.dumps(row.get("why") or []),
+            ranker_version,
+            now,
+        ))
+    with db() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO recommendation_items("
+            "recommendation_id,run_id,user_key,surface,item_key,rank,score,source,"
+            "reasons,ranker_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            values,
+        )
+
+
+def prune_attribution() -> None:
+    """Bound attribution history without orphaning surviving feedback."""
+    cutoff = time.time() - config.ATTRIBUTION_RETENTION_DAYS * 86400
+    with db() as conn:
+        conn.execute("DELETE FROM feedback_events WHERE occurred_at<?", (cutoff,))
+        conn.execute(
+            "DELETE FROM recommendation_items AS recommendation "
+            "WHERE created_at<? AND NOT EXISTS ("
+            "SELECT 1 FROM feedback_events AS feedback "
+            "WHERE feedback.recommendation_id="
+            "recommendation.recommendation_id)",
+            (cutoff,),
+        )
+
+
+def record_feedback(
+    user_key: str,
+    asin: str,
+    action: str,
+    recommendation_id: str | None = None,
+) -> None:
+    """Record an outcome, accepting attribution only for this user's ASIN."""
+    validated = None
+    with db() as conn:
+        if recommendation_id:
+            row = conn.execute(
+                "SELECT 1 FROM recommendation_items "
+                "WHERE recommendation_id=? AND user_key=? AND item_key=?",
+                (recommendation_id, user_key, asin),
+            ).fetchone()
+            if row:
+                validated = recommendation_id
+        conn.execute(
+            "INSERT INTO feedback_events("
+            "user_key,asin,action,recommendation_id,occurred_at) VALUES(?,?,?,?,?)",
+            (user_key, asin, action, validated, time.time()),
+        )
 
 
 def start_run(user_key: str) -> int:

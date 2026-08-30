@@ -124,11 +124,12 @@ def summary_page(request: Request, asin: str):
 
 
 @app.post("/want")
-def want(request: Request, asin: str = Form(...), title: str = Form("")):
+def want(request: Request, asin: str = Form(...), title: str = Form(""),
+         recommendation_id: str | None = Form(None)):
     """Ask for one recommendation. Same path the JSON API uses."""
     user = _viewer(request)
     try:
-        wants.want(user, asin, title)
+        wants.want(user, asin, title, recommendation_id)
     except wants.Denied as denied:
         return RedirectResponse(f"/?err={quote(f'{title}: {denied}')}", status_code=303)
     # Listenarr is shared, so a newly requested book stops being offered to
@@ -149,10 +150,11 @@ def cancel(request: Request, asin: str = Form(...), title: str = Form("")):
 
 
 @app.post("/dismiss")
-def dismiss(request: Request, asin: str = Form(...), title: str = Form("")):
-    """Never show this recommendation again."""
+def dismiss(request: Request, asin: str = Form(...), title: str = Form(""),
+            recommendation_id: str | None = Form(None)):
+    """Hide this recommendation for the configured cooling-off period."""
     user = _viewer(request)
-    wants.dismiss(user, asin)
+    wants.dismiss(user, asin, recommendation_id)
     shelves.invalidate(user.key)
     return RedirectResponse(f"/?msg={quote(f'{title} hidden')}", status_code=303)
 

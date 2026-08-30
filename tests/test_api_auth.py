@@ -87,6 +87,8 @@ assert body["user"]["name"] == "kadija"
 assert body["user"]["keyholder"] is False
 assert body["want"]["dailyCap"] == config.WANT_DAILY_CAP
 assert body["libraryIds"] == ["lib-audio", "lib-graphic"]
+assert body["dismiss"] == {
+    "supported": True, "undo": True, "days": config.DISMISS_TTL_DAYS}
 
 keyholder = client.get("/api/v1/capabilities", headers=auth("matt-token")).json()
 assert keyholder["user"]["keyholder"] is True
@@ -116,6 +118,47 @@ for n in range(config.WANT_DAILY_CAP):
     assert resp.json()["state"] == wants.ON_ITS_WAY
 assert client.post("/api/v1/want", headers=auth("kadija-token"),
                    json={"asin": "APIX", "title": "Over"}).status_code == 409
+
+# Optional recommendation ids survive the camel-case wire contract and are
+# accepted only when the row belongs to the caller and the same ASIN.
+run_id = store.start_run(matt.key)
+recommendation_id = f"{run_id}:discover:1:TRACKED"
+store.record_recommendations(run_id, matt.key, "discover", [{
+    "asin": "TRACKED", "score": 12, "source": "audible_sims",
+    "why": ["alongside a book"], "recommendation_id": recommendation_id,
+}], "2")
+tracked = client.post(
+    "/api/v1/want", headers=auth("matt-token"),
+    json={"asin": "TRACKED", "title": "Tracked", "recommendationId": recommendation_id},
+)
+assert tracked.status_code == 200, tracked.text
+with store.db() as conn:
+    feedback = conn.execute(
+        "SELECT recommendation_id FROM feedback_events "
+        "WHERE user_key=? AND asin=? AND action='want' ORDER BY id DESC LIMIT 1",
+        (matt.key, "TRACKED"),
+    ).fetchone()
+assert feedback["recommendation_id"] == recommendation_id
+
+hidden_id = f"{run_id}:discover:2:HIDE-ME"
+store.record_recommendations(run_id, matt.key, "discover", [{
+    "asin": "HIDE-ME", "score": 11, "source": "audible_sims",
+    "why": [], "recommendation_id": hidden_id,
+}], "2")
+hidden = client.post(
+    "/api/v1/dismiss", headers=auth("matt-token"),
+    json={"asin": "HIDE-ME", "recommendationId": hidden_id},
+)
+assert hidden.status_code == 200, hidden.text
+restored = client.post(
+    "/api/v1/restore", headers=auth("matt-token"),
+    json={"asin": "HIDE-ME", "recommendationId": hidden_id},
+)
+assert restored.status_code == 200, restored.text
+assert client.post(
+    "/api/v1/restore", headers=auth("matt-token"),
+    json={"asin": "HIDE-ME"},
+).status_code == 404
 
 # A GET must not have written a playlist.
 written = []

@@ -34,7 +34,12 @@ def allowance(user: jellyfin.User) -> int | None:
     return max(0, config.WANT_DAILY_CAP - used)
 
 
-def want(user: jellyfin.User, asin: str, title: str = "") -> tuple[str, str]:
+def want(
+    user: jellyfin.User,
+    asin: str,
+    title: str = "",
+    recommendation_id: str | None = None,
+) -> tuple[str, str]:
     """Ask for one book. Returns (state, message). Raises Denied if refused.
 
     Ordered so that nothing is charged against the allowance until Listenarr
@@ -68,6 +73,7 @@ def want(user: jellyfin.User, asin: str, title: str = "") -> tuple[str, str]:
     # it is the spelling the tagger will use when the book lands, and the
     # arrival check has to recognise it.
     store.record_request(user.key, asin, result.title or title, result.authors)
+    store.record_feedback(user.key, asin, "want", recommendation_id)
     log.info("want accepted user=%s asin=%s audiobook_id=%s listenarr=%r",
              user.key, asin, result.audiobook_id, result.message)
 
@@ -110,6 +116,7 @@ def cancel(user: jellyfin.User, asin: str) -> tuple[bool, str]:
     others = store.outstanding_request_users(asin) - {user.key}
     if others:
         store.forget_request(user.key, asin)
+        store.record_feedback(user.key, asin, "cancel")
         log.info("cancel user=%s asin=%s kept in Listenarr for %s",
                  user.key, asin, sorted(others))
         return True, ("Taken off your list. Somebody else is waiting on it, "
@@ -117,6 +124,7 @@ def cancel(user: jellyfin.User, asin: str) -> tuple[bool, str]:
 
     called_off = _stop_acquiring(asin)
     store.forget_request(user.key, asin)
+    store.record_feedback(user.key, asin, "cancel")
     log.info("cancel user=%s asin=%s listenarr_deleted=%s",
              user.key, asin, called_off)
     if called_off:
@@ -139,10 +147,24 @@ def _stop_acquiring(asin: str) -> bool:
     return listenarr.delete(audiobook_id)
 
 
-def dismiss(user: jellyfin.User, asin: str) -> None:
-    """Never offer this book to this account again."""
+def dismiss(
+    user: jellyfin.User, asin: str, recommendation_id: str | None = None
+) -> None:
+    """Hide this book from this account for the configured cooling-off period."""
     log.info("dismiss user=%s asin=%s", user.key, asin)
     store.dismiss(user.key, asin)
+    store.record_feedback(user.key, asin, "dismiss", recommendation_id)
+
+
+def restore(
+    user: jellyfin.User, asin: str, recommendation_id: str | None = None
+) -> bool:
+    """Undo a dismissal and make the book eligible again."""
+    restored = store.undismiss(user.key, asin)
+    if restored:
+        store.record_feedback(user.key, asin, "restore", recommendation_id)
+    log.info("restore user=%s asin=%s restored=%s", user.key, asin, restored)
+    return restored
 
 
 def states(user_key: str, owned: tuple[set, dict]) -> list[dict]:

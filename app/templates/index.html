@@ -118,6 +118,7 @@
           <form method="post" action="/want">
             <input type="hidden" name="asin" value="{{ b.asin }}">
             <input type="hidden" name="title" value="{{ b.title }}">
+            <input type="hidden" name="recommendation_id" value="{{ b.recommendation_id or '' }}">
             <!-- Accessible name carries the title so a list of buttons is not
                  twenty identical "Want it"s. -->
             <button type="submit">Want it — {{ b.title }}</button>
@@ -125,7 +126,8 @@
           <form method="post" action="/dismiss">
             <input type="hidden" name="asin" value="{{ b.asin }}">
             <input type="hidden" name="title" value="{{ b.title }}">
-            <button type="submit" class="secondary">Not interested — {{ b.title }}</button>
+            <input type="hidden" name="recommendation_id" value="{{ b.recommendation_id or '' }}">
+            <button type="submit" class="secondary">Hide for now — {{ b.title }}</button>
           </form>
         </div>
       </li>

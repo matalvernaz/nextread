@@ -100,6 +100,11 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         "search": {"supported": True, "limit": config.SEARCH_LIMIT},
         "summary": {"supported": True},
         "cancel": {"supported": True},
+        "dismiss": {
+            "supported": True,
+            "undo": True,
+            "days": config.DISMISS_TTL_DAYS,
+        },
     }
 
 
@@ -117,7 +122,15 @@ def get_shelves(user: jellyfin.User = Depends(caller)) -> dict:
              user.key, len(data["own"]), len(data["discover"]))
     return {
         "version": config.API_VERSION,
-        "owned": [{"id": row["id"], "title": row["title"], "reason": row["why"]}
+        "runId": data.get("run_id"),
+        "rankerVersion": data.get("ranker_version"),
+        "owned": [{
+            "id": row["id"],
+            "title": row["title"],
+            "reason": row["why"],
+            "recommendationId": row.get("recommendation_id"),
+            "source": row.get("source"),
+        }
                   for row in data["own"]],
         "suggestions": [_suggestion(row) for row in data["discover"]],
         # The index rather than the shelf's own view of what is owned: a book
@@ -160,11 +173,13 @@ def get_summary(asin: str, user: jellyfin.User = Depends(caller)) -> dict:
 @router.post("/want")
 def post_want(user: jellyfin.User = Depends(caller),
               asin: str = Body(..., embed=True),
-              title: str = Body("", embed=True)) -> dict:
+              title: str = Body("", embed=True),
+              recommendation_id: str | None = Body(
+                  None, embed=True, alias="recommendationId")) -> dict:
     """Ask for one book. Repeating it is free and does not spend the allowance."""
     log.info("api want user=%s asin=%s", user.key, asin)
     try:
-        state, message = wants.want(user, asin, title)
+        state, message = wants.want(user, asin, title, recommendation_id)
     except wants.Denied as denied:
         raise HTTPException(status_code=409, detail=str(denied)) from denied
     shelves.forget_asin(asin)
@@ -191,11 +206,25 @@ def post_cancel(user: jellyfin.User = Depends(caller),
 
 @router.post("/dismiss")
 def post_dismiss(user: jellyfin.User = Depends(caller),
-                 asin: str = Body(..., embed=True)) -> dict:
-    """Never offer this book to this account again."""
-    wants.dismiss(user, asin)
+                 asin: str = Body(..., embed=True),
+                 recommendation_id: str | None = Body(
+                     None, embed=True, alias="recommendationId")) -> dict:
+    """Hide this book for the configured cooling-off period."""
+    wants.dismiss(user, asin, recommendation_id)
     shelves.invalidate(user.key)
-    return {"asin": asin, "dismissed": True}
+    return {"asin": asin, "dismissed": True, "days": config.DISMISS_TTL_DAYS}
+
+
+@router.post("/restore")
+def post_restore(user: jellyfin.User = Depends(caller),
+                 asin: str = Body(..., embed=True),
+                 recommendation_id: str | None = Body(
+                     None, embed=True, alias="recommendationId")) -> dict:
+    """Undo a dismissal made by this account."""
+    if not wants.restore(user, asin, recommendation_id):
+        raise HTTPException(status_code=404, detail="That suggestion is not hidden.")
+    shelves.invalidate(user.key)
+    return {"asin": asin, "restored": True}
 
 
 def _suggestion(row: dict) -> dict:
@@ -206,8 +235,11 @@ def _suggestion(row: dict) -> dict:
         "authors": row.get("authors") or [],
         "narrators": row.get("narrators") or [],
         "series": row.get("series"),
+        "seriesPosition": row.get("series_position"),
         "runtimeMinutes": row.get("runtime_min"),
         "description": row.get("description") or "",
         "reason": row.get("why") or [],
+        "recommendationId": row.get("recommendation_id"),
+        "source": row.get("source"),
         "state": "available",
     }

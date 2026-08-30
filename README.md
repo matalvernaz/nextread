@@ -10,9 +10,10 @@ Per-user audiobook recommendations built from Jellyfin listening history.
 - **Recommends via Audible** — `/1.0/catalog/products/{asin}/sims`, which needs
   no key or account. Responses are cached in SQLite, while rendered results use
   a one-hour in-memory cache.
-  When Jellyfin holds a sibling Kindle or alternate-edition ASIN that returns no
-  neighbours, an exact title-and-author match through Listenarr resolves and
-  caches the audiobook ASIN instead.
+  When Jellyfin has no ASIN, or holds a sibling Kindle or alternate-edition ASIN
+  that returns no neighbours, an exact title-and-author match through Listenarr
+  resolves and caches the audiobook ASIN instead. Failed resolutions are cached
+  too, so an ASIN-less seed does not repeat the same searches every hour.
 - **Writes back two ways** — owned-and-unplayed picks become a Jellyfin
   playlist for that user (so existing clients show it with no app change);
   unowned picks appear on this app's own page, and approving one hands it to
@@ -74,8 +75,8 @@ rating is introduced through the same ramp rather than bypassing its safety floo
 ## Two similarity channels
 
 - **Audible `/sims`**, keyed on ASIN. Strong, but it takes one ASIN and returns
-  neighbours: it can never consume a rating vector, and it is blind to the 76% of
-  this library that carries no ASIN.
+  neighbours: it can never consume a rating vector. ASIN-less library seeds are
+  first resolved by exact title and author where Audible has a matching edition.
 - **Local TF-IDF over descriptions** (`app/textmodel.py`). Unigrams plus bigrams
   — "system" is generic, "system apocalypse" is a fingerprint. This is the half
   that consumes the whole rating vector, and the only half that reaches the
@@ -88,6 +89,31 @@ noun, so idf hands it top weight and the profile comes out as series names
 
 Keyword discovery exists and is **off** — see the reasoning in `app/config.py`.
 It failed on real data twice and needs more ratings, not more code.
+
+## Ranking guardrails
+
+`RANKER_VERSION=2` keeps strong signals from collapsing the shelf into one
+author or series:
+
+- Audible neighbours receive a logarithmically smaller vote as their position
+  falls. Repeated similarity and author/narrator affinity are capped once the
+  evidence is established.
+- A series advances only after at least 90% of the current volume is consumed.
+  Exactly one immediate next volume is promoted. Later owned volumes are held
+  back, and a missing volume is never skipped over.
+- A numbered Audible sequel is rejected unless it is book one or directly
+  follows this listener's completed series frontier.
+- Alternate-marketplace editions are deduplicated by normalised title and
+  author. The final rank applies a deterministic repetition penalty: another
+  book by the same author or in the same series must have a progressively
+  stronger base score to keep its place, but is never excluded by a hard quota.
+- With no listening history, the owned shelf falls back to recently added books
+  instead of returning an unexplained empty screen.
+
+TF-IDF still affects ordering, but its incidental keywords are no longer shown
+as explanations. A row exposes at most two stable reasons: series position,
+Audible provenance, author/narrator affinity, or sufficiently strong thematic
+overlap.
 
 ## Summaries
 
@@ -161,6 +187,9 @@ Requests are suppressed globally, dismissals only for the person who made them.
 Listenarr is shared, so a book one listener asks for is acquired once and stops
 being offered to everybody else.
 
+A dismissal means "not now": it expires after `DISMISS_TTL_DAYS` (30 by
+default), and clients can undo it immediately through `POST /api/v1/restore`.
+
 ### Changing your mind
 
 `wants.cancel` takes a book off one account's list and calls the acquisition
@@ -186,12 +215,12 @@ request is not a book that was acquired.
 For clients that cannot complete a browser sign-in -- which is every native app.
 `GET /api/v1/capabilities`, `GET /api/v1/shelves`, `GET /api/v1/search`,
 `GET /api/v1/summary`, `POST /api/v1/want`, `POST /api/v1/cancel`,
-`POST /api/v1/dismiss`.
+`POST /api/v1/dismiss`, `POST /api/v1/restore`.
 
 `capabilities` announces the newer routes as named blocks (`search`, `summary`,
-`cancel`) rather than by bumping the version: a client that predates one asks
-for nothing, and one that postdates a server without it hides its own control
-instead of failing a tap.
+`cancel`, `dismiss`) rather than by bumping the version: a client that predates
+one asks for nothing, and one that postdates a server without it hides its own
+control instead of failing a tap.
 
 **Authentication is the caller's own Jellyfin access token**, sent as
 `Authorization: MediaBrowser Token="..."` or `X-Emby-Token`, never in a query
@@ -214,6 +243,13 @@ ids** rather than rendered rows, so a client hydrates them through its ordinary
 item request and keeps resume position, downloads and play-on-activation. Only
 the unowned half is described in full, because it has no library item to
 describe.
+
+Every ranked row also carries an opaque `recommendationId`, plus the shelf's
+`runId` and `rankerVersion`. Clients return the row id with a want or dismissal.
+Nextread validates that it belongs to the same account and item before linking
+the feedback, then retains ranked snapshots and events for
+`ATTRIBUTION_RETENTION_DAYS` (180 by default). This makes rank and source outcome
+rates measurable without trusting client-supplied attribution.
 
 ## Logging
 
@@ -243,6 +279,10 @@ All configuration comes from the environment; see `app/config.py`.
 - `WANT_DAILY_CAP` (default 3) bounds requests per non-keyholder per day.
 - `STILL_LOOKING_AFTER_HOURS` (default 12) is when a request stops claiming to
   be arriving. Two sweep cycles.
+- `AUDIBLE_REGIONS` (default `ca,us`) is the marketplace preference order.
+- `DISMISS_TTL_DAYS` (default 30) is how long "hide for now" suppresses a book.
+- `ATTRIBUTION_RETENTION_DAYS` (default 180) bounds ranking snapshots and
+  feedback history.
 - `TOKEN_CACHE_SECONDS` (default 60) is how long an introspected access token
   stays trusted. Short because expiry is the only thing that makes a token
   revoked in Jellyfin stop working here.
@@ -337,6 +377,13 @@ with **no `/data` mounted** — never `docker exec` into the running service:
 
     docker run --rm -v "$PWD":/work -w /work ghcr.io/matalvernaz/nextread:latest \
         bash -c 'for t in tests/test_*.py; do python "$t" || exit 1; done'
+
+Each file is an executable integration scenario with its own process-level
+fakes. `pytest` uses `tests/suite_scripts.py` to run those same files in isolated
+subprocesses, so fake clients and module configuration cannot leak between
+scenarios:
+
+    JELLYFIN_TOKEN=test-token pytest -q
 
 The dependencies exist only in the container, and that container's environment
 sets `DB_PATH` to the live database. The files used to say

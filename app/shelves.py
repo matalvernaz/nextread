@@ -181,12 +181,10 @@ def result(user: jellyfin.User, force: bool = False,
 
 def write_playlist(user: jellyfin.User, data: dict) -> None:
     """Settle a cached result's outstanding playlist write, without recomputing."""
-    if not data.get("own"):
-        return
     log.info("settling deferred playlist write user=%s items=%d",
-             user.key, len(data["own"]))
+             user.key, len(data.get("own") or []))
     jellyfin.set_playlist(user.id, data["playlist_name"],
-                          [r["id"] for r in data["own"]])
+                          [r["id"] for r in data.get("own") or []])
     with _cache_guard:
         entry = _cache.get(user.key)
         if entry is not None:
