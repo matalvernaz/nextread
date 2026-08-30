@@ -89,6 +89,30 @@ noun, so idf hands it top weight and the profile comes out as series names
 Keyword discovery exists and is **off** — see the reasoning in `app/config.py`.
 It failed on real data twice and needs more ratings, not more code.
 
+## Summaries
+
+A blurb is one Audible request per book, so it is its own route and is fetched
+only when somebody opens one — a shelf of forty would otherwise pay forty times
+for text nobody asked to read.
+
+**The long blurb needs `product_extended_attrs` and nothing says so.**
+`product_desc` returns only `merchandising_summary`, Audible's teaser, which is
+a couple of hundred characters and ends mid-sentence in an ellipsis;
+`publisher_summary` is the whole description and it is absent from the payload
+entirely without that response group. Measured on `api.audible.ca`,
+2026-08-29: B0FQ65NC2F answers with 205 characters under the old groups and
+1,433 with the new one. Because the preference for the long form was already
+written, the omission looked exactly like a book that had no long blurb, and
+every summary the app has ever shown was the teaser. Cached products carry
+their own `products_schema_version` so the 720-hour TTL cannot go on serving
+teasers for a month after a fix.
+
+Both fields are **HTML**, and neither surface that shows one renders markup:
+the search page assigns it to `textContent` and EchoFin draws it in a SwiftUI
+`Text`. `search._plain` turns block ends into blank lines, drops the rest of
+the tags and unescapes entities, so a screen reader reads the blurb instead of
+reading its tags out.
+
 ## Requesting a book
 
 Asking for an unowned book is one action with one code path, shared by the web
@@ -137,11 +161,37 @@ Requests are suppressed globally, dismissals only for the person who made them.
 Listenarr is shared, so a book one listener asks for is acquired once and stops
 being offered to everybody else.
 
+### Changing your mind
+
+`wants.cancel` takes a book off one account's list and calls the acquisition
+off -- `DELETE` on Listenarr's row with `deleteFiles` and `deleteFolder` both
+false, so it stops a search and never touches a file. Three things about it are
+deliberate:
+
+- **The Listenarr row belongs to the household.** A book two accounts asked for
+  is one acquisition, so it is only deleted when nobody else is still waiting.
+  Otherwise just the one ledger row goes.
+- **Cancelling is not dismissing.** A book abandoned for taking three days is
+  not a book somebody stopped wanting, so nothing is written to `dismissed` and
+  the shelf may offer it again once Listenarr no longer holds it.
+- **An unreachable Listenarr still clears the row.** The row is the thing on
+  screen that was asked to go, and refusing would leave it there for as long as
+  Listenarr stayed down. The message says which of the two happened.
+
+The day's allowance is refunded, because the row is gone and a cancelled
+request is not a book that was acquired.
+
 ## JSON API
 
 For clients that cannot complete a browser sign-in -- which is every native app.
-`GET /api/v1/capabilities`, `GET /api/v1/shelves`, `POST /api/v1/want`,
+`GET /api/v1/capabilities`, `GET /api/v1/shelves`, `GET /api/v1/search`,
+`GET /api/v1/summary`, `POST /api/v1/want`, `POST /api/v1/cancel`,
 `POST /api/v1/dismiss`.
+
+`capabilities` announces the newer routes as named blocks (`search`, `summary`,
+`cancel`) rather than by bumping the version: a client that predates one asks
+for nothing, and one that postdates a server without it hides its own control
+instead of failing a tap.
 
 **Authentication is the caller's own Jellyfin access token**, sent as
 `Authorization: MediaBrowser Token="..."` or `X-Emby-Token`, never in a query

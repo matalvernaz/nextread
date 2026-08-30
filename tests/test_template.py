@@ -44,6 +44,21 @@ assert 'action="/search"' in html
 assert 'role="search"' in html
 assert html.index('action="/search"') < html.index('id="own"')
 
+# Every outstanding request offers a way out of itself, and a book that has
+# arrived does not -- there is nothing left to stop looking for.
+requests_html = environment.get_template("index.html").render(
+    user_name="alex",
+    own=[], discover=[], seeds=1, library=2, ratings=0, rating_floor=5,
+    playlist_name="Next Read", msg="", err="",
+    requests=[
+        {"asin": "A1", "title": "Still Coming & Waiting", "state": "still_looking"},
+        {"asin": "A2", "title": "Turned Up", "state": "in_library"},
+    ],
+)
+assert 'action="/cancel"' in requests_html
+assert "Stop looking — Still Coming &amp; Waiting" in requests_html
+assert "Stop looking — Turned Up" not in requests_html
+
 search_html = environment.get_template("search.html").render(
     user_name="alex",
     query="boba",

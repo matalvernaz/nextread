@@ -135,5 +135,51 @@ wants.dismiss(kadija, "PERSONAL")
 assert "PERSONAL" in store.suppressed_asins(kadija.key)
 assert "PERSONAL" not in store.suppressed_asins("someone-else")
 
+# --- cancelling a request ---------------------------------------------------
+deleted = []
+listenarr.find_by_asin = lambda asin: {"id": 99, "title": "Whatever"}
+listenarr.delete = lambda audiobook_id: deleted.append(audiobook_id) or True
+listenarr.add = lambda asin, monitored=True: listenarr.AddResult(
+    True, "Sent to Listenarr", 99)
+
+removed, message = wants.cancel(matt, "NEVER-ASKED-FOR")
+assert not removed and "not on your list" in message, message
+assert not deleted, "cancelling something nobody asked for must not delete anything"
+
+wants.want(matt, "CANCEL-ME", "Regretted")
+spent = store.requests_since(matt.key, 0)
+removed, message = wants.cancel(matt, "CANCEL-ME")
+assert removed and deleted == [99], (removed, deleted)
+assert "called off" in message, message
+assert not any(r["asin"] == "CANCEL-ME" for r in store.requests_for(matt.key))
+assert store.requests_since(matt.key, 0) == spent - 1, \
+    "a cancelled request must not go on spending the day's allowance"
+
+# Cancelling does NOT dismiss: a book abandoned for taking too long is not a
+# book somebody has stopped wanting, and the shelf may offer it again.
+assert "CANCEL-ME" not in store.suppressed_asins(matt.key)
+
+# Listenarr's row is the household's. Somebody else still waiting on the book
+# keeps the acquisition running, and only this account's row goes.
+deleted.clear()
+wants.want(matt, "SHARED-BOOK", "Both of us")
+# Recorded rather than requested: kadija spent her allowance above, and what
+# `cancel` reads is the ledger row, not how it got there.
+store.record_request(kadija.key, "SHARED-BOOK", "Both of us")
+removed, message = wants.cancel(matt, "SHARED-BOOK")
+assert removed and not deleted, (removed, deleted)
+assert "still being looked for" in message, message
+assert any(r["asin"] == "SHARED-BOOK" for r in store.requests_for(kadija.key)), \
+    "cancelling one account's request must not touch another's"
+
+# A Listenarr that will not answer must not strand the row on screen. The row
+# goes and the message says the search could not be stopped.
+listenarr.delete = lambda audiobook_id: False
+wants.want(matt, "LISTENARR-DOWN", "Stuck")
+removed, message = wants.cancel(matt, "LISTENARR-DOWN")
+assert removed, "an unreachable Listenarr must still clear the row"
+assert "may still turn up" in message, message
+assert not any(r["asin"] == "LISTENARR-DOWN" for r in store.requests_for(matt.key))
+
 harness.discard(DB_PATH)
 print("want path checks passed")

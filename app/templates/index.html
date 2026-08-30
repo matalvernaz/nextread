@@ -74,6 +74,18 @@
             On its way
           {%- endif -%}
         </p>
+        {% if r.state != 'in_library' %}
+        <div class="actions">
+          <form method="post" action="/cancel">
+            <input type="hidden" name="asin" value="{{ r.asin }}">
+            <input type="hidden" name="title" value="{{ r.title }}">
+            <!-- Title in the accessible name, as everywhere else on this page:
+                 a list of requests is otherwise a column of identical buttons. -->
+            <button type="submit" class="secondary">
+              Stop looking — {{ r.title or r.asin }}</button>
+          </form>
+        </div>
+        {% endif %}
       </li>
       {% endfor %}
     </ol>

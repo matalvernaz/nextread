@@ -84,6 +84,61 @@ def want(user: jellyfin.User, asin: str, title: str = "") -> tuple[str, str]:
     return ON_ITS_WAY, result.message
 
 
+def cancel(user: jellyfin.User, asin: str) -> tuple[bool, str]:
+    """Take one book off this account's list and call its acquisition off.
+
+    Returns (removed, message). Removing does NOT dismiss: a book abandoned
+    because it has been three days coming is not a book somebody has stopped
+    wanting, and the shelf is free to offer it again once Listenarr no longer
+    holds it.
+
+    Two things make this more than a delete:
+
+    * **Listenarr's row belongs to the household, not to one account.** A book
+      two people asked for is one acquisition, so it is only called off when
+      nobody else is still waiting on it. Files and folder are left alone
+      either way -- this cancels a search, it does not delete a book.
+    * **The ledger row goes even when Listenarr will not answer.** The row is
+      the thing on screen that was asked to go, and refusing would leave it
+      there for as long as Listenarr stayed down, with no way to clear it. The
+      message says which of the two happened rather than claiming both.
+    """
+    if _request_row(user.key, asin) is None:
+        log.info("cancel user=%s asin=%s no-such-request", user.key, asin)
+        return False, "That book is not on your list."
+
+    others = store.outstanding_request_users(asin) - {user.key}
+    if others:
+        store.forget_request(user.key, asin)
+        log.info("cancel user=%s asin=%s kept in Listenarr for %s",
+                 user.key, asin, sorted(others))
+        return True, ("Taken off your list. Somebody else is waiting on it, "
+                      "so it is still being looked for.")
+
+    called_off = _stop_acquiring(asin)
+    store.forget_request(user.key, asin)
+    log.info("cancel user=%s asin=%s listenarr_deleted=%s",
+             user.key, asin, called_off)
+    if called_off:
+        return True, "Taken off your list, and the search was called off."
+    return True, ("Taken off your list. Listenarr could not be told to stop, "
+                  "so the book may still turn up.")
+
+
+def _stop_acquiring(asin: str) -> bool:
+    """Drop Listenarr's row for one book, keeping anything already on disk."""
+    row = listenarr.find_by_asin(asin)
+    if row is None:
+        # Nothing to call off: the sweep never got a row for it, or somebody
+        # has already removed one. Either way the acquisition is not running.
+        return True
+    audiobook_id = listenarr._audiobook_id(row)
+    if audiobook_id is None:
+        log.warning("cancel asin=%s: Listenarr row carries no id, cannot delete", asin)
+        return False
+    return listenarr.delete(audiobook_id)
+
+
 def dismiss(user: jellyfin.User, asin: str) -> None:
     """Never offer this book to this account again."""
     log.info("dismiss user=%s asin=%s", user.key, asin)

@@ -44,6 +44,22 @@ def _has_product(payload) -> bool:
     """
     return bool(payload) and bool((payload.get("title") or "").strip())
 _RESPONSE_GROUPS = "product_desc,contributors,product_attrs,media"
+
+# One book at a time can afford the long blurb, and a shelf of neighbours cannot.
+#
+# `product_desc` carries only `merchandising_summary`, Audible's teaser, which
+# is a couple of hundred characters and ends mid-sentence in an ellipsis. The
+# whole description is `publisher_summary`, and that arrives ONLY when
+# `product_extended_attrs` is asked for -- measured against api.audible.ca on
+# 2026-08-29, B0FQ65NC2F answers with 205 characters under the groups above and
+# 1,433 with this one added. Without it `search.summary`'s preference for the
+# long form could never be satisfied and every summary was the teaser.
+#
+# Deliberately NOT added to `_RESPONSE_GROUPS`: that is the sims call, which
+# fetches ten neighbours per seed across twenty seeds, and the long blurb is
+# several times the payload for text no shelf row displays.
+_PRODUCT_RESPONSE_GROUPS = (
+    "contributors,product_attrs,product_desc,product_extended_attrs,media")
 _TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
 # Audible honours `similarity_type` and each value returns a genuinely different
@@ -126,7 +142,7 @@ def product(asin: str) -> dict | None:
     cached = store.get_product(asin)
     if cached is not None:
         return cached
-    params = {"response_groups": "contributors,product_attrs,product_desc,media"}
+    params = {"response_groups": _PRODUCT_RESPONSE_GROUPS}
     # Every configured marketplace, in order, until one actually carries it.
     # Stopping at the first is what made a book sold only in the other store
     # look like a book that does not exist.

@@ -138,6 +138,16 @@ def want(request: Request, asin: str = Form(...), title: str = Form("")):
         f"/?msg={quote(f'{title} is on its way')}", status_code=303)
 
 
+@app.post("/cancel")
+def cancel(request: Request, asin: str = Form(...), title: str = Form("")):
+    """Stop waiting for a book that was asked for. Same path the JSON API uses."""
+    user = _viewer(request)
+    removed, message = wants.cancel(user, asin)
+    key = "msg" if removed else "err"
+    return RedirectResponse(
+        f"/?{key}={quote(f'{title or asin}: {message}')}", status_code=303)
+
+
 @app.post("/dismiss")
 def dismiss(request: Request, asin: str = Form(...), title: str = Form("")):
     """Never show this recommendation again."""

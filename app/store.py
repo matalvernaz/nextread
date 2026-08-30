@@ -15,6 +15,14 @@ from . import config
 # not being kept when it was written.
 SIMS_SCHEMA_VERSION = 3
 
+# The same idea for cached Audible products, versioned apart from sims so a
+# reshaped product does not throw away a similarity graph that costs one request
+# per seed per axis to rebuild. v2: every row was fetched before
+# `product_extended_attrs` was asked for, so none of them carries
+# `publisher_summary` at all, and `PRODUCT_TTL_HOURS` would go on serving the
+# teaser in its place for a month after the fix landed.
+PRODUCTS_SCHEMA_VERSION = 2
+
 _SUBMITTED_SCHEMA = """
 CREATE TABLE IF NOT EXISTS submitted (
     asin         TEXT PRIMARY KEY,
@@ -110,7 +118,8 @@ def init() -> None:
     bump has to DROP: v1 keyed on `asin` alone, which collides once one ASIN has a
     neighbour set per similarity axis. v3 drops for a different reason -- the
     rows are correct for the marketplace they were fetched from and wrong for
-    this one.
+    this one. Cached products carry their own version for the same reason and
+    are dropped separately, so reshaping one cache does not cost the other.
     """
     with db() as conn:
         conn.execute(
@@ -131,6 +140,14 @@ def init() -> None:
                 "INSERT INTO meta(key,value) VALUES('sims_schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SIMS_SCHEMA_VERSION),))
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='products_schema_version'").fetchone()
+        if row is None or int(row["value"]) != PRODUCTS_SCHEMA_VERSION:
+            conn.execute("DROP TABLE IF EXISTS products")
+            conn.execute(
+                "INSERT INTO meta(key,value) VALUES('products_schema_version',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(PRODUCTS_SCHEMA_VERSION),))
         conn.executescript(SCHEMA)
         _migrate_user_scope(conn)
         _migrate_requests(conn)
@@ -401,6 +418,33 @@ def fulfil_requests(user_key: str, asins: set) -> None:
             "WHERE user_key=? AND asin=? AND fulfilled_at IS NULL",
             [(time.time(), user_key, a) for a in asins],
         )
+
+
+def forget_request(user_key: str, asin: str) -> bool:
+    """Erase one request. True when there was one to erase.
+
+    A delete rather than another timestamp column: an abandoned request is not
+    a state the shelf has anything to say about, and leaving the row would keep
+    it counting against the day's allowance for a book nobody is getting.
+    """
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM requests WHERE user_key=? AND asin=?", (user_key, asin))
+    return cur.rowcount > 0
+
+
+def outstanding_request_users(asin: str) -> set:
+    """Every account still waiting on this book.
+
+    Listenarr holds one row per book for the whole household, so cancelling has
+    to know whether anybody else is waiting on it before deleting that row.
+    """
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT user_key FROM requests WHERE asin=? AND fulfilled_at IS NULL",
+            (asin,),
+        ).fetchall()
+    return {r["user_key"] for r in rows}
 
 
 def dismiss(user_key: str, asin: str) -> None:

@@ -80,6 +80,25 @@ check("summary carries the title", got["title"], "Demon World Boba Shop")
 search.store_backed_product = lambda asin: None
 check("no product is empty text, not a crash", search.summary("B0MISSING")["summary"], "")
 
+# Both blurbs are HTML, and every surface that shows one renders it as text --
+# `textContent` on the search page, a SwiftUI `Text` in EchoFin -- so the tags
+# were being read out as words.
+search.store_backed_product = lambda asin: {
+    "title": "Ironbound",
+    "publisher_summary":
+        "<p><i>An action-packed epic from </i>Somebody<i>.</i></p> "
+        "<p><b>In the Iron Empire, only the strongest Ascend.</b></p>"
+        "<p>Castor &amp; the Cor Heart&mdash;a trial.<br>Then the attack.</p>",
+}
+got = search.summary("B0FQ65NC2F")["summary"]
+check("no markup survives", "<" in got, False)
+check("entities are resolved", "&amp;" in got or "&mdash;" in got, False)
+check("paragraphs become breaks", got.count("\n\n"), 3)
+check("the text itself is intact",
+      got.splitlines()[0], "An action-packed epic from Somebody.")
+check("a line break inside a paragraph is one too",
+      got.endswith("a trial.\n\nThen the attack."), True)
+
 if failures:
     print("FAIL")
     for f in failures:

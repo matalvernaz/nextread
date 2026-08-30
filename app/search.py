@@ -13,9 +13,20 @@ Owned books are *marked*, not hidden. On the Discover shelf an owned book is
 noise and is filtered out. In a search it is the answer: somebody typing a title
 wants to know it is already here, and silence would read as "we cannot get it".
 """
+import html
+import re
+
 from . import config, engine, jellyfin, listenarr, logs, shelves, wants
 
 log = logs.get(__name__)
+
+# Where one block of the blurb ends and the next begins. Substituted before the
+# rest of the tags are dropped, or eight paragraphs arrive as one unbroken
+# sentence with nothing in it for a screen reader to pause on.
+_BLOCK_END = re.compile(r"(?i)</p\s*>|<br\s*/?>|</li\s*>|</div\s*>|</h[1-6]\s*>")
+_TAG = re.compile(r"<[^>]+>")
+_HORIZONTAL_SPACE = re.compile(r"[^\S\n]+")
+_BLANK_LINES = re.compile(r"\n\s*\n\s*")
 
 
 def search(user: jellyfin.User, query: str, limit: int | None = None) -> list[dict]:
@@ -65,8 +76,8 @@ def summary(asin: str) -> dict:
     what the shelf row already implies.
     """
     product = store_backed_product(asin) or {}
-    text = (product.get("publisher_summary")
-            or product.get("merchandising_summary") or "").strip()
+    text = _plain(product.get("publisher_summary")
+                  or product.get("merchandising_summary") or "")
     return {
         "asin": asin,
         "title": (product.get("title") or "").strip(),
@@ -74,6 +85,21 @@ def summary(asin: str) -> dict:
         "runtimeMinutes": product.get("runtime_length_min"),
         "summary": text,
     }
+
+
+def _plain(markup: str) -> str:
+    """Audible's blurb as something a screen reader can read aloud.
+
+    Both summaries come back as HTML -- paragraphs, bold, italics -- and neither
+    surface that shows one renders any of it: the search page assigns it to
+    `textContent` and EchoFin draws it in a `Text`. So the markup was being
+    spoken as words. Entities are unescaped last, so an `&lt;` that was text in
+    the blurb stays text rather than becoming a tag one pass too late to strip.
+    """
+    text = _TAG.sub("", _BLOCK_END.sub("\n\n", markup))
+    text = html.unescape(text)
+    text = _HORIZONTAL_SPACE.sub(" ", text)
+    return _BLANK_LINES.sub("\n\n", text).strip()
 
 
 def store_backed_product(asin: str):

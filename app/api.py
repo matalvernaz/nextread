@@ -99,6 +99,7 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         # hides its own control instead of failing a tap.
         "search": {"supported": True, "limit": config.SEARCH_LIMIT},
         "summary": {"supported": True},
+        "cancel": {"supported": True},
     }
 
 
@@ -168,6 +169,23 @@ def post_want(user: jellyfin.User = Depends(caller),
         raise HTTPException(status_code=409, detail=str(denied)) from denied
     shelves.forget_asin(asin)
     return {"asin": asin, "state": state, "message": message,
+            "remainingToday": wants.allowance(user)}
+
+
+@router.post("/cancel")
+def post_cancel(user: jellyfin.User = Depends(caller),
+                asin: str = Body(..., embed=True)) -> dict:
+    """Take one book off this account's list, and stop looking for it.
+
+    Not a DELETE: the ASIN is the marketplace's, not this app's, and putting it
+    in a path would need it escaped by every client that has one. It also does
+    more than erase a row -- it calls an acquisition off -- and `cancel` says so
+    where a method alone would not.
+    """
+    removed, message = wants.cancel(user, asin)
+    if not removed:
+        raise HTTPException(status_code=404, detail=message)
+    return {"asin": asin, "removed": True, "message": message,
             "remainingToday": wants.allowance(user)}
 
 
