@@ -16,7 +16,11 @@ h3 { margin: 0 0 .25rem; font-size: 1.05rem; }
 .why { margin: .4rem 0 .6rem; padding-left: 1.25rem; }
 .summary { margin: .4rem 0 .75rem; }
 .summary > summary { cursor: pointer; font-weight: 600; }
-.summary > p { margin: .4rem 0 0; }
+/* `white-space` because the blurb arrives as text with blank lines between
+   its paragraphs: Audible's markup is stripped server-side, where the other
+   surface that shows it reads the text out rather than rendering it. Without
+   this the breaks collapse and eight paragraphs become one wall of text. */
+.summary > p { margin: .4rem 0 0; white-space: pre-line; }
 .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 button {
   font: inherit; padding: .5rem .9rem; cursor: pointer;
