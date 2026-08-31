@@ -25,6 +25,11 @@ _ITEM_FIELDS = (
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
+# The credential check answers a health endpoint, and the container's health
+# probe gives that endpoint ten seconds. The ordinary timeout would spend all
+# of them waiting for a server that is merely slow.
+_CREDENTIAL_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
+
 
 @dataclass(frozen=True, slots=True)
 class User:
@@ -40,6 +45,24 @@ class User:
 
 def _client() -> httpx.Client:
     return httpx.Client(base_url=config.JELLYFIN_URL, headers=_HEADERS, timeout=_TIMEOUT)
+
+
+def credential_rejected() -> bool:
+    """Whether Jellyfin is actively refusing this service's own API key.
+
+    True means a person has to act: the key was revoked, or the server stopped
+    accepting the form it is sent in. Everything else -- a refused connection,
+    a timeout, a 5xx -- is Jellyfin having a moment, which this service cannot
+    fix and which passes on its own, so it reads as False rather than flapping
+    the health state on somebody else's restart.
+    """
+    try:
+        with httpx.Client(base_url=config.JELLYFIN_URL, headers=_HEADERS,
+                          timeout=_CREDENTIAL_TIMEOUT) as c:
+            resp = c.get("/System/Info")
+    except httpx.HTTPError:
+        return False
+    return resp.status_code in (401, 403)
 
 
 def user(name: str | None = None) -> User:

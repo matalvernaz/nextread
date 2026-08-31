@@ -32,6 +32,10 @@ services:
       WANT_DAILY_CAP: "3"
       STILL_LOOKING_AFTER_HOURS: "12"
       LOG_LEVEL: "INFO"
+      # Where clients reach the API at the Jellyfin origin. Used only to check
+      # that route is really there: without it the app finds nothing and says
+      # nothing, and nobody learns why. See the nextread-jellyfin router below.
+      PUBLIC_URL: "https://jellyfin.thealvernaz.space/nextread"
       DB_PATH: "/data/nextread.db"
       TZ: "America/Vancouver"
     volumes:

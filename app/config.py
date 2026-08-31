@@ -143,7 +143,16 @@ ATTRIBUTION_RETENTION_DAYS = int(
 
 # The JSON API's shape version. A client reads it and refuses a shape it does
 # not know rather than guessing at missing fields.
+SERVICE_NAME = "nextread"
+
 API_VERSION = 1
+
+# Where clients reach this service at the Jellyfin origin, e.g.
+# "https://jellyfin.example.com/nextread". Optional, and only ever used to
+# check that route is really there -- see app/selfcheck.py. Unset means the
+# check does not run, which is right for an install that serves only the
+# browser pages.
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
 
 # How many books a non-keyholder may request per rolling day.
 #

@@ -213,9 +213,16 @@ request is not a book that was acquired.
 ## JSON API
 
 For clients that cannot complete a browser sign-in -- which is every native app.
-`GET /api/v1/capabilities`, `GET /api/v1/shelves`, `GET /api/v1/search`,
-`GET /api/v1/summary`, `POST /api/v1/want`, `POST /api/v1/cancel`,
-`POST /api/v1/dismiss`, `POST /api/v1/restore`.
+`GET /api/v1/info`, `GET /api/v1/capabilities`, `GET /api/v1/shelves`,
+`GET /api/v1/search`, `GET /api/v1/summary`, `POST /api/v1/want`,
+`POST /api/v1/cancel`, `POST /api/v1/dismiss`, `POST /api/v1/restore`.
+
+`info` is the only one that answers without a token, and it answers
+`{"service": "nextread", "protocol": 1}` and nothing about anybody. It exists
+because every other route needs credentials, which leaves a client unable to
+tell "this server does not run Nextread" from a missing proxy rule, a stopped
+container or a rejected token. All four look like a 404 or a 401 at the
+Jellyfin origin, and only one of them is ordinary.
 
 `capabilities` announces the newer routes as named blocks (`search`, `summary`,
 `cancel`, `dismiss`) rather than by bumping the version: a client that predates
@@ -343,13 +350,19 @@ handle_path /nextread/api/* {
 
 ### Checking it
 
-    curl -s -o /dev/null -w '%{http_code}\n' https://jellyfin.example.com/nextread/api/v1/capabilities
+    curl -s https://jellyfin.example.com/nextread/api/v1/info
 
-**401 is the passing answer** — the request reached this app, the prefix came
-off, and it declined a caller with no token. A **404** means the rule did not
+**`{"service":"nextread","protocol":1}` is the passing answer** — the request
+reached this app and the prefix came off. A **404** means the rule did not
 take: the proxy is answering, not this. Two known ways to get one: a rule that
 does not outrank Jellyfin's own, and a Traefik docker provider that has not
 registered the container yet, which takes 25-30 seconds.
+
+Set `PUBLIC_URL` to that same address minus the `/api/v1/info`, and Nextread
+runs the check itself a minute after it starts and hourly after that, logging
+an error naming the address when it fails. It is never a health-check failure:
+your proxy would drop a container that is still serving its own hostname
+perfectly well, turning half a misconfiguration into all of one.
 
 Confirm you have not shadowed anything of Jellyfin's either:
 
@@ -359,8 +372,11 @@ Confirm you have not shadowed anything of Jellyfin's either:
 
 1. Ask `<origin>/nextread/api/v1/capabilities` with the user's Jellyfin token
    in an `Authorization: MediaBrowser Token="..."` header.
-2. Treat any failure as "not installed" and say nothing. Most servers do not
-   run this, and an error surface for an absent optional service is noise.
+2. On failure, ask `<origin>/nextread/api/v1/info` before concluding anything.
+   A 404 there is ordinary absence: most servers do not run this, and an error
+   surface for an absent optional service is noise. A 200 naming this service
+   means it *is* installed and something else is wrong, which is worth a log
+   line -- and worth a sentence when the address was typed by hand.
 3. Check `version` against what it understands, and `libraryIds` for the
    library it is showing.
 4. Offer a manual address as an override, for a service that runs somewhere
@@ -409,6 +425,10 @@ are particular to one homelab, and copying it verbatim gets you a router that
 Traefik drops silently. Take the environment block and the
 `nextread-jellyfin` router from it; the proxy section above is the part meant
 to be copied.
+
+`PUBLIC_URL` is where clients reach this at the Jellyfin origin, e.g.
+`https://jellyfin.example.com/nextread`. Optional, and used only for the route
+check above.
 
 Only `JELLYFIN_TOKEN` is required. `LIBRARY_IDS` unset means every library
 Jellyfin calls `books`, which is usually right. Without `LISTENARR_URL` the

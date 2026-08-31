@@ -10,12 +10,13 @@ reader.
 """
 from urllib.parse import quote
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import api, config, jellyfin, logs, search, shelves, store, wants
+from . import (api, config, jellyfin, logs, search, selfcheck, shelves, store,
+               wants)
 
 log = logs.get("main")
 
@@ -29,6 +30,7 @@ app.include_router(api.router)
 def _startup() -> None:
     logs.configure()
     store.init()
+    selfcheck.watch()
     log.info("nextread up: libraries=%d cap=%s/day still-looking-after=%dh",
              len(jellyfin.library_ids()), config.WANT_DAILY_CAP,
              config.STILL_LOOKING_AFTER_HOURS)
@@ -56,7 +58,21 @@ def _viewer(request: Request) -> jellyfin.User:
 
 
 @app.get("/healthz")
-def healthz() -> dict:
+def healthz(response: Response) -> dict:
+    """Liveness, plus the one upstream fault that needs a person.
+
+    A check that fails whenever a downstream is unreachable turns one outage
+    into a restart loop, so this does not probe for reachability. A credential
+    Jellyfin has stopped accepting is a different thing: every route here
+    fails, it will not come right on its own, and without this the container
+    reports healthy for the whole time it is useless. The share gateway this
+    service borrowed its shape from ran that way for days.
+    """
+    if jellyfin.credential_rejected():
+        log.warning("unhealthy: Jellyfin is refusing this service's API key")
+        response.status_code = 503
+        return {"ok": False,
+                "detail": "Jellyfin is refusing this service's API key."}
     return {"ok": True}
 
 

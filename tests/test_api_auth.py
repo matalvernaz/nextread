@@ -167,5 +167,57 @@ shelves.invalidate()
 assert client.get("/api/v1/shelves", headers=auth("matt-token")).status_code == 200
 assert written == [], "the API's shelf read must not write a playlist"
 
+
+# --- the version number is a promise, not a counter -------------------------
+# Both shipped EchoFin clients require version == 1 exactly, so bumping this
+# removes recommendations from every phone that already has the app and cannot
+# be undone by shipping a new one. Additive capability is announced by a named
+# block in /capabilities, which an older client simply does not ask about. Do
+# not "fix" this. The share gateway pins its own the same way and for the same
+# reason.
+assert config.API_VERSION == 1, "API_VERSION is frozen at 1"
+assert body["version"] == 1
+
+# The states a request can be in are part of that same promise. The clients
+# decode them into a fixed enum, so a fourth state does not degrade one row --
+# it fails the decode of the whole response and takes the screen with it.
+assert body["states"] == ["on_its_way", "still_looking", "in_library"], body["states"]
+
+
+# --- being found at all -----------------------------------------------------
+# /info answers without a token so that "no such service" and "the service is
+# broken" stop being the same answer. Everything else here needs credentials,
+# and a client probing the Jellyfin origin cannot tell a missing proxy rule
+# from a server that simply does not run this.
+found = client.get("/api/v1/info")
+assert found.status_code == 200, found.text
+assert found.json() == {"service": "nextread", "protocol": 1}, found.text
+assert introspections[-1:] != [""], "/info must not introspect anything"
+
+# It says nothing about anybody. A route with no auth in front of it must not
+# be a way to learn who has an account here.
+assert "user" not in found.json()
+
+
+# --- a health check that can notice a retired credential --------------------
+jellyfin.credential_rejected = lambda: False
+assert client.get("/healthz").status_code == 200
+
+jellyfin.credential_rejected = lambda: True
+refused = client.get("/healthz")
+assert refused.status_code == 503, refused.status_code
+assert refused.json()["ok"] is False
+jellyfin.credential_rejected = lambda: False
+
+
+# --- the token cache does not grow for ever ---------------------------------
+# Expired rows are read past but never removed, so a service that has seen a
+# few thousand rotated tokens would hold every one of them until it restarted.
+api._tokens.clear()
+api._tokens["long-gone"] = (0.0, matt)
+assert client.get("/api/v1/capabilities", headers=auth("matt-token")).status_code == 200
+assert "long-gone" not in api._tokens, "an expired entry must be dropped, not kept"
+assert len(api._tokens) == 1
+
 harness.discard(DB_PATH)
 print("api auth checks passed")

@@ -67,8 +67,32 @@ def caller(authorization: str | None = Header(default=None),
         raise HTTPException(
             status_code=503, detail="Jellyfin is unreachable.") from exc
     with _tokens_guard:
+        # Expired entries are dropped here rather than left to accumulate: the
+        # only thing that ever reads them again is this same lookup, so nothing
+        # else would clear a rotated token's row for the life of the process.
+        cutoff = time.monotonic() - config.TOKEN_CACHE_SECONDS
+        for stale in [k for k, (at, _) in _tokens.items() if at <= cutoff]:
+            del _tokens[stale]
         _tokens[digest] = (time.monotonic(), user)
     return user
+
+
+@router.get("/info")
+def info() -> dict:
+    """That this service is here, answered without a token.
+
+    It exists so absence and malfunction stop being the same answer. A client
+    looks for this service at the Jellyfin origin, which most servers do not
+    serve it from, so a 404 there has to mean "not installed" -- and it also
+    means a missing proxy rule, a stopped container, a rejected token and a
+    version this client cannot read, none of which the client can tell apart
+    while every route needs credentials first.
+
+    Deliberately says nothing about anybody, and deliberately does not list
+    features: `/capabilities` negotiates those, per account, and a second list
+    here would be one to keep in step for no gain.
+    """
+    return {"service": config.SERVICE_NAME, "protocol": config.API_VERSION}
 
 
 @router.get("/capabilities")
