@@ -7,6 +7,7 @@ fallback must be unreachable from here.
 """
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
@@ -214,7 +215,11 @@ jellyfin.credential_rejected = lambda: False
 # Expired rows are read past but never removed, so a service that has seen a
 # few thousand rotated tokens would hold every one of them until it restarted.
 api._tokens.clear()
-api._tokens["long-gone"] = (0.0, matt)
+# Relative to now, not a bare 0.0: time.monotonic() counts from boot, so on a
+# freshly started machine zero is not yet expired and the check passes for the
+# wrong reason. It failed exactly that way on CI.
+api._tokens["long-gone"] = (
+    time.monotonic() - config.TOKEN_CACHE_SECONDS - 1, matt)
 assert client.get("/api/v1/capabilities", headers=auth("matt-token")).status_code == 200
 assert "long-gone" not in api._tokens, "an expired entry must be dropped, not kept"
 assert len(api._tokens) == 1
