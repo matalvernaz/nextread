@@ -39,6 +39,7 @@ def want(
     asin: str,
     title: str = "",
     recommendation_id: str | None = None,
+    metadata: dict | None = None,
 ) -> tuple[str, str]:
     """Ask for one book. Returns (state, message). Raises Denied if refused.
 
@@ -46,6 +47,9 @@ def want(
     has actually accepted the book, and so that a repeated tap is free: the
     ledger entry is keyed on (account, ASIN), and a second one neither restarts
     the clock nor spends another request.
+
+    `metadata` is the add-shaped record when the caller already has it; a
+    series listing does, and passing it spares Listenarr a lookup per book.
     """
     already = _request_row(user.key, asin)
     if already is not None and already["fulfilled_at"] is None:
@@ -64,7 +68,9 @@ def want(
 
     log.info("want user=%s asin=%s title=%r remaining=%s",
              user.key, asin, title, "uncapped" if remaining is None else remaining)
-    result = listenarr.add(asin)
+    # Only named when there is one: the existing callers and their test
+    # doubles know `add` by its two-argument shape.
+    result = listenarr.add(asin, metadata=metadata) if metadata else listenarr.add(asin)
     if not result.ok:
         log.warning("want refused user=%s asin=%s reason=%s", user.key, asin, result.message)
         raise Denied(result.message)

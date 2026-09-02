@@ -62,6 +62,13 @@ SIMS_TTL_HOURS = int(os.environ.get("SIMS_TTL_HOURS", "168"))
 # Shorter than the sims TTL only because it is cheap to refetch one product.
 PRODUCT_TTL_HOURS = int(os.environ.get("PRODUCT_TTL_HOURS", "720"))
 
+# How many books one "find more of this series" tap may ask for. A series can
+# run to forty volumes, and one tap quietly turning into forty acquisitions is
+# not what anybody meant by it. The rest are asked for on the next tap, which
+# skips whatever is already on order. Non-keyholders are bounded by
+# WANT_DAILY_CAP as well, whichever is smaller.
+SERIES_WANT_LIMIT = int(os.environ.get("SERIES_WANT_LIMIT", "10"))
+
 # How many search hits to ask Listenarr for. Its own cap applies too; this is
 # what a person can stand to hear read out in one list.
 SEARCH_LIMIT = int(os.environ.get("SEARCH_LIMIT", "25"))

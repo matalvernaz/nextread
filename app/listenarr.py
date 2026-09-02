@@ -241,6 +241,69 @@ def _from_audible_product(asin: str) -> dict | None:
     }
 
 
+def metadata_from_search_row(row: dict, region: str | None = None) -> dict:
+    """The add-shaped record for one row of a search or series listing."""
+    return _to_add_metadata(row, region=region)
+
+
+def series_candidates(name: str, region: str | None = None) -> list[dict] | None:
+    """Audible series whose listing matches a name, via Listenarr.
+
+    Each row carries `asin`, `name` and `region`. None when Listenarr will not
+    answer, which is not the same as an empty list: that means Audible has no
+    series by that name.
+    """
+    try:
+        with _client() as c:
+            resp = c.get(f"{_API}/search/audible/series",
+                         params={"name": name, "region": region or config.AUDIBLE_REGION})
+    except httpx.HTTPError as exc:
+        log.warning("series lookup failed name=%r (%s)", name, exc)
+        return None
+    if resp.status_code == 404:
+        return []
+    if resp.status_code >= 400:
+        log.warning("series lookup rejected name=%r status=%d", name, resp.status_code)
+        return None
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    # Listenarr has answered both shapes across versions: a bare list, and an
+    # envelope with the list under `results`.
+    rows = payload if isinstance(payload, list) else (payload or {}).get("results") or []
+    return [r for r in rows if isinstance(r, dict) and r.get("asin")]
+
+
+def series_books(series_asin: str, region: str | None = None) -> list[dict] | None:
+    """Every book Audible files under one series, via Listenarr's provider.
+
+    The same row shape `audible_search` returns, so `metadata_from_search_row`
+    applies unchanged. None when Listenarr will not answer; an empty list when
+    Audible knows the series and lists nothing under it.
+    """
+    try:
+        with _client() as c:
+            resp = c.get(f"{_API}/search/audible/series/books/{series_asin}",
+                         params={"region": region or config.AUDIBLE_REGION})
+    except httpx.HTTPError as exc:
+        log.warning("series books lookup failed series=%s (%s)", series_asin, exc)
+        return None
+    if resp.status_code == 404:
+        return []
+    if resp.status_code >= 400:
+        log.warning("series books lookup rejected series=%s status=%d",
+                    series_asin, resp.status_code)
+        return None
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, list):
+        return []
+    return [r for r in payload if isinstance(r, dict) and r.get("asin")]
+
+
 def audible_search(query: str, limit: int = 25) -> list[dict]:
     """Free-text Audible catalogue search, via Listenarr.
 
@@ -333,8 +396,13 @@ def find_by_asin(asin: str) -> dict | None:
         return None
 
 
-def add(asin: str, monitored: bool = True) -> AddResult:
+def add(asin: str, monitored: bool = True, metadata: dict | None = None) -> AddResult:
     """Hand one book to Listenarr to acquire.
+
+    `metadata` is the add-shaped record when the caller already holds one --
+    a series listing hands over every row it was given -- and saves the two
+    marketplace lookups `audible_metadata` would otherwise spend per book.
+    Without it the ASIN is identified here.
 
     `AutoSearch` stays False on purpose -- it is an inline await, so True would
     block this request on serialised indexer searches. Immediate acquisition
@@ -350,7 +418,7 @@ def add(asin: str, monitored: bool = True) -> AddResult:
         return AddResult(
             True, "Already in Listenarr", _audiobook_id(existing), title, authors)
 
-    meta = audible_metadata(asin)
+    meta = metadata or audible_metadata(asin)
     if not meta:
         return AddResult(
             False,

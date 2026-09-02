@@ -18,7 +18,7 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
-from . import config, jellyfin, logs, search, shelves, wants
+from . import config, jellyfin, logs, search, series, shelves, wants
 
 log = logs.get("api")
 
@@ -129,6 +129,7 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
             "undo": True,
             "days": config.DISMISS_TTL_DAYS,
         },
+        "seriesWant": {"supported": True, "limit": config.SERIES_WANT_LIMIT},
     }
 
 
@@ -249,6 +250,33 @@ def post_restore(user: jellyfin.User = Depends(caller),
         raise HTTPException(status_code=404, detail="That suggestion is not hidden.")
     shelves.invalidate(user.key)
     return {"asin": asin, "restored": True}
+
+
+@router.post("/series/want")
+def post_series_want(user: jellyfin.User = Depends(caller),
+                     name: str = Body(..., embed=True, alias="series"),
+                     anchor_item_id: str | None = Body(
+                         None, embed=True, alias="anchorItemId")) -> dict:
+    """Ask for the books of one series the library does not hold yet.
+
+    Decided against the library, not against Listenarr: whatever is already on
+    the shelf under any edition is not asked for again. Bounded per tap and,
+    for a capped account, per day; the sentence in the answer says what was
+    asked for and what was not, because the screen that made the request has
+    no row to show it on. See `series.want_series`.
+    """
+    log.info("api series want user=%s series=%r anchor=%s",
+             user.key, name, anchor_item_id)
+    try:
+        outcome = series.want_series(user, name.strip(), anchor_item_id)
+    except series.NotASeries as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except series.Unresolvable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except series.Unavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"version": config.API_VERSION, **outcome,
+            "remainingToday": wants.allowance(user)}
 
 
 def _suggestion(row: dict) -> dict:

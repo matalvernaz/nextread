@@ -66,6 +66,10 @@ assert client.get("/api/v1/capabilities", headers=auth("nonsense")).status_code 
 assert client.get("/api/v1/shelves", headers=auth("nonsense")).status_code == 401
 assert client.post("/api/v1/want", headers=auth("nonsense"),
                    json={"asin": "A"}).status_code == 401
+assert client.post("/api/v1/series/want", headers=auth("nonsense"),
+                   json={"series": "S"}).status_code == 401
+assert client.post("/api/v1/series/want",
+                   json={"series": "S"}).status_code == 401, "no token"
 
 # Jellyfin unreachable is 503, never a guess at who the caller might be.
 assert client.get("/api/v1/capabilities",
@@ -90,6 +94,7 @@ assert body["want"]["dailyCap"] == config.WANT_DAILY_CAP
 assert body["libraryIds"] == ["lib-audio", "lib-graphic"]
 assert body["dismiss"] == {
     "supported": True, "undo": True, "days": config.DISMISS_TTL_DAYS}
+assert body["seriesWant"] == {"supported": True, "limit": config.SERIES_WANT_LIMIT}
 
 keyholder = client.get("/api/v1/capabilities", headers=auth("matt-token")).json()
 assert keyholder["user"]["keyholder"] is True
