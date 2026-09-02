@@ -8,7 +8,9 @@ import sqlite3
 import time
 from contextlib import contextmanager
 
-from . import config
+from . import config, logs
+
+log = logs.get("store")
 
 # Bumped whenever the shape of a cached sims payload changes. A stale entry is
 # worse than a miss: it looks fresh and silently scores zero on fields that were
@@ -192,6 +194,70 @@ def init() -> None:
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+#: Written once every `user_key` column holds a Jellyfin account id.
+USER_KEY_SCHEME = "user_key_scheme"
+
+#: Every table that scopes its rows to a listener.
+USER_SCOPED_TABLES = (
+    "submitted", "requests", "dismissed", "runs", "recommendation_items",
+    "feedback_events", "shelves",
+)
+
+
+def user_key_scheme() -> str:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key=?", (USER_KEY_SCHEME,)).fetchone()
+    return row["value"] if row else "name"
+
+
+def rekey_users(name_to_id: dict[str, str]) -> int:
+    """Move every user-scoped table off display names and onto account ids.
+
+    Run once, from startup, because it needs Jellyfin to say which id each
+    name belongs to and the store cannot ask. The name was the key until
+    2026-09-02: renaming an account emptied that listener's shelf, requests
+    and history, and recreating a name inherited a stranger's.
+
+    Rows whose name matches no current account are left where they are and
+    logged. The account may be renamed back, and a listener's own history is
+    not worth discarding to tidy a key.
+
+    - Parameter name_to_id: casefolded display name to Jellyfin account id.
+    - Returns: how many rows moved.
+    """
+    moved = 0
+    with db() as conn:
+        if conn.execute("SELECT value FROM meta WHERE key=?",
+                        (USER_KEY_SCHEME,)).fetchone():
+            return 0
+        unmatched: set[str] = set()
+        for table in USER_SCOPED_TABLES:
+            if "user_key" not in _columns(conn, table):
+                continue
+            keys = {row["user_key"] for row in
+                    conn.execute(f"SELECT DISTINCT user_key FROM {table}")}
+            for key in keys:
+                item_id = name_to_id.get(key)
+                if item_id is None:
+                    if key not in name_to_id.values():
+                        unmatched.add(key)
+                    continue
+                # OR REPLACE rather than a plain UPDATE: `shelves` is keyed on
+                # user_key alone, so an account that already has an id-keyed
+                # row would otherwise fail the whole migration on a conflict.
+                cur = conn.execute(
+                    f"UPDATE OR REPLACE {table} SET user_key=? WHERE user_key=?",
+                    (item_id, key))
+                moved += cur.rowcount
+        for key in sorted(unmatched):
+            log.warning("rows for %r match no Jellyfin account; left as they are", key)
+        conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                     (USER_KEY_SCHEME, "id"))
+    log.info("user-scoped tables rekeyed onto account ids, %d row(s) moved", moved)
+    return moved
 
 
 def _migrate_user_scope(conn: sqlite3.Connection) -> None:

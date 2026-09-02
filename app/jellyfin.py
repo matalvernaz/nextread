@@ -39,8 +39,25 @@ class User:
 
     @property
     def key(self) -> str:
-        """Stable-enough local scope shared with the SSO username."""
-        return self.name.casefold()
+        """How this account is written in the database.
+
+        Jellyfin's own account id, not the display name. The name was the key
+        until 2026-09-02, and it moves: renaming an account emptied that
+        listener's shelf, request ledger and history, and recreating a name
+        inherited a stranger's. The id is in hand on both identity paths.
+        """
+        return self.id
+
+    @property
+    def is_configured_user(self) -> bool:
+        """Whether this is the account named by JELLYFIN_USER.
+
+        A question about the NAME, deliberately: the setting is a name, and
+        the database key is no longer one.
+        """
+        return bool(config.JELLYFIN_USER) and (
+            self.name.casefold() == config.JELLYFIN_USER.casefold()
+        )
 
 
 def _client() -> httpx.Client:
@@ -63,6 +80,16 @@ def credential_rejected() -> bool:
     except httpx.HTTPError:
         return False
     return resp.status_code in (401, 403)
+
+
+def all_users() -> dict[str, str]:
+    """Every Jellyfin account, as casefolded display name to account id.
+
+    Only the one-time rekey needs this.
+    """
+    with _client() as c:
+        users = c.get("/Users").raise_for_status().json()
+    return {u["Name"].casefold(): u["Id"] for u in users}
 
 
 def user(name: str | None = None) -> User:

@@ -109,15 +109,16 @@ def _similarity_vote(seed_weight: float, position: int) -> float:
     return seed_weight / math.log2(position + SIMILARITY_RANK_OFFSET)
 
 
-def _rating(item: dict, user_key: str | None = None) -> float | None:
+def _rating(item: dict, user: "jellyfin.User | None" = None) -> float | None:
     """This listener's score, or None -- including for a rating we refuse to trust.
 
     A known-bad rating reads as unrated everywhere: as a seed weight, in the
     ramp's rating count, and in the decision to treat the book as a seed at all.
     """
-    user_key = (user_key or config.JELLYFIN_USER).casefold()
+    # A question about the account's NAME: the ignore list is configured for
+    # the account JELLYFIN_USER names, and the database key is an id.
     ignored = (config.IGNORED_RATING_ITEM_IDS
-               if user_key == config.JELLYFIN_USER.casefold() else ())
+               if user is None or user.is_configured_user else ())
     if (item.get("Id") or "").replace("-", "").lower() in ignored:
         return None
     return (item.get("UserData") or {}).get("Rating")
@@ -136,7 +137,7 @@ def rating_blend(rating_count: int) -> float:
     return min(1.0, progress / max(1, config.RATINGS_RAMP_SPAN))
 
 
-def _seed_weight(item: dict, blend: float, user_key: str | None = None) -> float:
+def _seed_weight(item: dict, blend: float, user: "jellyfin.User | None" = None) -> float:
     """How hard one seed should pull, given its rating and the ramp.
 
     At blend 0 the score itself has no effect. At blend 1 the rating table applies
@@ -144,7 +145,7 @@ def _seed_weight(item: dict, blend: float, user_key: str | None = None) -> float
     """
     if blend <= 0:
         return 1.0
-    score = _rating(item, user_key)
+    score = _rating(item, user)
     # The 0.0 threshold catches every valid score; the default covers a value
     # outside the server's 0-10 range rather than raising StopIteration.
     target = NEUTRAL_WEIGHT if score is None else next(
@@ -168,11 +169,11 @@ def _listening_progress(item: dict) -> float:
 
 
 def _engagement_weight(
-    item: dict, blend: float, user_key: str | None = None
+    item: dict, blend: float, user: "jellyfin.User | None" = None
 ) -> float:
     """Progress strength, with explicit ratings introduced by the same ramp."""
     progress = _listening_progress(item)
-    if _rating(item, user_key) is None:
+    if _rating(item, user) is None:
         return progress
     return progress + (1.0 - progress) * blend
 
@@ -181,13 +182,13 @@ def _played(item: dict) -> bool:
     return _listening_progress(item) > 0
 
 
-def _is_seed(item: dict, user_key: str | None = None) -> bool:
+def _is_seed(item: dict, user: "jellyfin.User | None" = None) -> bool:
     """A book that says something about this listener's taste.
 
     A rating keeps an unplayed book eligible; the ratings ramp decides when that
     explicit signal gains influence.
     """
-    return _played(item) or _rating(item, user_key) is not None
+    return _played(item) or _rating(item, user) is not None
 
 
 def _asin(item: dict) -> str | None:
@@ -472,7 +473,7 @@ def _series_frontiers(library: list[dict]) -> dict[str, float]:
 
 
 def _series_plan(
-    library: list[dict], user_key: str | None = None
+    library: list[dict], user: "jellyfin.User | None" = None
 ) -> tuple[set[str], set[str]]:
     """Immediate next-volume ids, and later volumes that must not flood the shelf."""
     grouped = _numbered_series(library)
@@ -486,7 +487,7 @@ def _series_plan(
         frontier = frontiers.get(series_key)
         if frontier is None:
             first = min(positions)
-            first_is_current = any(_is_seed(item, user_key) for item in positions[first])
+            first_is_current = any(_is_seed(item, user) for item in positions[first])
             # With no listening history, only book one is a defensible entry
             # point. If it is already in progress, even that row is current and
             # every later volume waits.
@@ -501,7 +502,7 @@ def _series_plan(
 
         blocked_ids |= {
             item["Id"] for position, items in positions.items()
-            if position <= frontier for item in items if not _is_seed(item, user_key)}
+            if position <= frontier for item in items if not _is_seed(item, user)}
         future_positions = [position for position in positions if position > frontier]
         if not future_positions:
             continue
@@ -515,7 +516,7 @@ def _series_plan(
                 for item in positions[position]}
             continue
         at_next = positions[next_position]
-        eligible = [item for item in at_next if not _is_seed(item, user_key)]
+        eligible = [item for item in at_next if not _is_seed(item, user)]
         promoted = min(
             eligible,
             key=lambda item: (_norm(item.get("Name") or ""), item.get("Id") or ""),
@@ -835,7 +836,7 @@ def _keyword_candidates(queries: list[str], owned_check) -> dict[str, dict]:
 
 def _playlist_name(user: jellyfin.User) -> str:
     """Keep the legacy user's playlist stable; make every other name unique."""
-    if user.key == config.JELLYFIN_USER.casefold():
+    if user.is_configured_user:
         return config.PLAYLIST_NAME
     return f"{config.PLAYLIST_NAME} — {user.name}"
 
@@ -845,21 +846,21 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     run_id = store.start_run(user.key)
     library = jellyfin.books(user.id)
 
-    seeds = [i for i in library if _is_seed(i, user.key)]
+    seeds = [i for i in library if _is_seed(i, user)]
 
     # Signed mode -- where a bad rating pushes rather than merely failing to pull
     # -- needs enough ratings that no single one can steer the result. Counted
     # across the whole library, not just the seeds, so the figure is the honest
     # "how many ratings exist".
-    rating_count = sum(1 for i in library if _rating(i, user.key) is not None)
+    rating_count = sum(1 for i in library if _rating(i, user) is not None)
     blend = rating_blend(rating_count)
     weights = {
-        i["Id"]: (_seed_weight(i, blend, user.key)
-                  * _engagement_weight(i, blend, user.key))
+        i["Id"]: (_seed_weight(i, blend, user)
+                  * _engagement_weight(i, blend, user))
         for i in seeds
     }
     taste = _taste(seeds, weights)
-    series_next, series_blocked = _series_plan(library, user.key)
+    series_next, series_blocked = _series_plan(library, user)
     taste["series"] = _series_frontiers(library)
     taste["series_next"] = series_next
 
@@ -933,7 +934,7 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     for item in library:
         # Excludes rated-but-unplayed too: it is already a seed, and offering it
         # back as a suggestion would be nonsense.
-        if _is_seed(item, user.key):
+        if _is_seed(item, user):
             continue
         if item.get("Id") in series_blocked:
             continue
@@ -977,7 +978,7 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     if not seeds and not own:
         recent = [
             item for item in library
-            if not _is_seed(item, user.key) and item.get("Id") not in series_blocked]
+            if not _is_seed(item, user) and item.get("Id") not in series_blocked]
         recent.sort(key=lambda item: (
             -_created_at(item), _norm(item.get("Name") or ""), item.get("Id") or ""))
         own = [{

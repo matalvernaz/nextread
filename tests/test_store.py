@@ -132,4 +132,29 @@ with tempfile.TemporaryDirectory() as tmp:
     assert event is None and snapshot is None, \
         "expired feedback must release its old snapshot"
 
+# The 2026-09-02 rekey: every user-scoped table moves off casefolded display
+# names and onto Jellyfin account ids. Renaming an account used to empty that
+# listener's shelf, requests and history; recreating a name inherited a
+# stranger's.
+with tempfile.TemporaryDirectory() as tmp:
+    config.DB_PATH = str(Path(tmp) / "rekey.db")
+    store.init()
+    assert store.user_key_scheme() == "name", "an unmigrated database says so"
+    store.record_request("renamed", "B0RENAME", "Theirs", ())
+    store.record_request("gone-away", "B0ORPHAN", "Orphan", ())
+    store.put_shelf("renamed", {"discover": []})
+
+    moved = store.rekey_users({"renamed": "user-renamed"})
+    assert moved >= 2, moved
+    with store.db() as conn:
+        keys = {r["user_key"] for r in conn.execute("SELECT user_key FROM requests")}
+    assert "user-renamed" in keys and "renamed" not in keys, keys
+    # Left alone rather than discarded: the account may be renamed back, and a
+    # listener's own history is not worth losing to tidy a key.
+    assert "gone-away" in keys, keys
+    assert store.get_shelf("user-renamed") is not None
+    assert store.user_key_scheme() == "id"
+    assert store.rekey_users({"renamed": "user-renamed"}) == 0, "runs once"
+
+
 print("store migration and isolation checks passed")

@@ -21,7 +21,7 @@ def request(username: str | None = None) -> Request:
 
 matt = jellyfin.User(id="user-matt", name="matt")
 alex = jellyfin.User(id="user-alex", name="Alex")
-users = {u.key: u for u in (matt, alex)}
+users = {u.name.casefold(): u for u in (matt, alex)}
 
 real_user = main.jellyfin.user
 main.jellyfin.user = lambda name: users[name.casefold()]
@@ -67,12 +67,12 @@ try:
     assert shelves.result(matt)["user_name"] == "matt"
     assert shelves.result(alex)["user_name"] == "Alex"
     assert shelves.result(matt)["user_name"] == "matt"
-    assert calls == ["matt", "alex"]
+    assert calls == [matt.key, alex.key]
 
-    shelves.invalidate("matt")
+    shelves.invalidate(matt.key)
     shelves.result(matt)
     shelves.result(alex)
-    assert calls == ["matt", "alex", "matt"]
+    assert calls == [matt.key, alex.key, matt.key]
 finally:
     shelves.engine.run = real_run
     shelves.invalidate()
@@ -129,7 +129,10 @@ assert engine._playlist_name(alex) == f"{main.config.PLAYLIST_NAME} — Alex"
 
 bad_id = min(main.config.IGNORED_RATING_ITEM_IDS)
 bad_rating = {"Id": bad_id, "UserData": {"Rating": 1}}
-assert engine._rating(bad_rating, "matt") is None
-assert engine._rating(bad_rating, "alex") == 1
+# The ignore list belongs to the account JELLYFIN_USER names, which is a
+# question about the name rather than about the database key.
+assert engine._rating(bad_rating, matt) is None
+assert engine._rating(bad_rating, alex) == 1
+assert matt.is_configured_user and not alex.is_configured_user
 
 print("multi-user request checks passed")

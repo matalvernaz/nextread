@@ -8,10 +8,11 @@ The UI is deliberately plain server-rendered HTML with real forms. Every core
 action works with no JavaScript, which is the most robust shape for a screen
 reader.
 """
-from urllib.parse import quote
+import os
+from urllib.parse import quote, urlsplit
 
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -25,15 +26,79 @@ templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(api.router)
 
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+
+#: Additional hostnames whose pages may post to this one. Rarely needed: the
+#: default is "the host this request arrived at", which covers every ordinary
+#: deployment.
+ALLOWED_ORIGIN_HOSTS = {
+    h.strip().lower()
+    for h in os.environ.get("ALLOWED_ORIGIN_HOSTS", "").split(",") if h.strip()}
+
+
+@app.middleware("http")
+async def block_cross_origin_writes(request: Request, call_next):
+    """Refuse a write whose page came from somewhere else.
+
+    The browser pages ride a forward-auth cookie, and that cookie is scoped to
+    the parent domain -- so a page on any sibling subdomain can post to this
+    one and spend a signed-in person's daily allowance, dismiss their shelf or
+    submit picks as them. SameSite does not stop a *same-site* cross-origin
+    post and CORS does not apply to form submissions, so checking the origin
+    of unsafe methods is the whole mitigation.
+
+    A request carrying neither Origin nor Referer is allowed. Some privacy
+    setups strip both, and native clients send neither -- which is also why
+    this does not disturb the JSON API, whose callers authenticate on a token
+    rather than on a cookie and so have nothing to be ridden.
+
+    Copied from nextup, deliberately verbatim: the two services sit on the
+    same parent domain behind the same forward-auth, so the exposure and the
+    answer are the same.
+    """
+    if request.method in SAFE_METHODS:
+        return await call_next(request)
+    raw = request.headers.get("origin") or request.headers.get("referer") or ""
+    host = urlsplit(raw).hostname if raw else None
+    arrived_at = (request.headers.get("x-forwarded-host")
+                  or request.url.hostname or "").split(",")[0].strip().lower()
+    expected = ({arrived_at} if arrived_at else set()) | ALLOWED_ORIGIN_HOSTS
+    if host and expected and host.lower() not in expected:
+        log.warning("refused a write from %s (expected one of %s)",
+                    host, sorted(expected))
+        return PlainTextResponse(
+            f"Refused: this looks like a cross-site request (from {host}).",
+            status_code=403)
+    return await call_next(request)
+
 
 @app.on_event("startup")
 def _startup() -> None:
     logs.configure()
     store.init()
+    _rekey_users_once()
     selfcheck.watch()
     log.info("nextread up: libraries=%d cap=%s/day still-looking-after=%dh",
              len(jellyfin.library_ids()), config.WANT_DAILY_CAP,
              config.STILL_LOOKING_AFTER_HOURS)
+
+
+def _rekey_users_once() -> None:
+    """Move every user-scoped table off display names and onto account ids.
+
+    Deliberately fatal when Jellyfin cannot be asked. Serving id-keyed reads
+    over a name-keyed database is the failure this migration exists to
+    prevent: every shelf reads empty, every request ledger reads unspent, and
+    a listener asks again for a book already on its way.
+    """
+    if store.user_key_scheme() == "id":
+        return
+    try:
+        names = jellyfin.all_users()
+    except Exception as exc:
+        raise RuntimeError(
+            "cannot rekey user-scoped tables: Jellyfin did not answer") from exc
+    store.rekey_users(names)
 
 
 def _viewer(request: Request) -> jellyfin.User:
