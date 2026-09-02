@@ -549,6 +549,30 @@ def outstanding_request_users(asin: str) -> set:
     return {r["user_key"] for r in rows}
 
 
+def ordered_asins() -> set:
+    """Every book still on order for the household: any account, unfulfilled.
+
+    What "already being looked for" means, and nothing more. `suppressed_asins`
+    is the wider net the shelf uses and folds in dismissals and fulfilled
+    requests; read as "on order" it would tell somebody a book they hid is on
+    its way.
+    """
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT asin FROM requests WHERE fulfilled_at IS NULL").fetchall()
+    return {r["asin"] for r in rows}
+
+
+def dismissed_asins(user_key: str) -> set:
+    """Books this account has hidden and whose cooling-off has not lapsed."""
+    cutoff = time.time() - config.DISMISS_TTL_DAYS * 86400
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT asin FROM dismissed WHERE user_key=? AND dismissed_at>?",
+            (user_key, cutoff)).fetchall()
+    return {r["asin"] for r in rows}
+
+
 def dismiss(user_key: str, asin: str) -> None:
     with db() as conn:
         conn.execute(

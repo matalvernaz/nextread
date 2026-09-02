@@ -49,6 +49,10 @@ LIBRARY = [
     # Owned with no Audible id: recognised by title and author.
     book("j2", "Fool Moon", "The Dresden Files", 2),
     book("j4", "Summer Knight", "The Dresden Files", 4, asin="B0DF04"),
+    # Owned under a shorter title, with an author tag the household-wide check
+    # cannot take for the same author. Within the series, the title decides.
+    book("js", "Side Jobs", "The Dresden Files", None,
+         author="Jim Butcher (The Dresden Files)"),
     book("h1", "Harry Potter and the Philosopher's Stone (Full-Cast Edition)", HP, 1,
          asin="B0HP01", author="J.K. Rowling"),
     book("h2", "Harry Potter and the Chamber of Secrets (Full-Cast Edition)", HP, 2,
@@ -58,6 +62,11 @@ LIBRARY = [
          "Harry Potter (Jim Dale)", 1, author="J.K. Rowling"),
     book("l1", "Long Saga 1", "Long Saga", 1, asin="B0LS01", author="Saga Author"),
     book("x1", "Lone Book", None, None),
+    # Another torrented set, whose Audible series name carries more words.
+    book("d2", "Harry Potter and the Philosopher's Stone, Book 1 (Stephen Fry)",
+         "Harry Potter (Stephen Fry)", 1, author="J.K. Rowling"),
+    # An Audible id stored in lower case, as Jellyfin was handed it.
+    book("c1", "Case Saga 1", "Case Saga", 1, asin="b0cs01", author="Case Author"),
 ]
 
 PRODUCTS = {
@@ -88,7 +97,9 @@ SERIES_BOOKS = {
         row("B0DF04", "Summer Knight", "4", "SER-DF", DF),
         row("B0DF05", "Death Masks", "5", "SER-DF", DF),
         row("B0DF06", "Blood Rites", "6", "SER-DF", DF),
-        row("B0DFSS", "Side Jobs", None, "SER-DF", DF),
+        row("B0DFSS", "Side Jobs: Stories from the Dresden Files", None, "SER-DF", DF),
+        # An unnumbered companion listed twice, like every numbered book.
+        row("B0DFSSUS", "Side Jobs: Stories from the Dresden Files", None, "SER-DF", DF),
     ],
     "SER-HPFC": [
         row("B0HP01", "Harry Potter and the Philosopher's Stone (Full-Cast Edition)", "1",
@@ -107,12 +118,34 @@ SERIES_BOOKS = {
         row("B0HPUK1", "Harry Potter and the Philosopher's Stone, Book 1", "1",
             "SER-HP-ONE", "Harry Potter", "J.K. Rowling"),
     ],
+    "B0D229XM3B": [
+        row("B0HPFRY1", "Harry Potter and the Philosopher's Stone, Book 1", "1",
+            "B0D229XM3B", "Harry Potter (Narrated by Stephen Fry)", "J.K. Rowling"),
+        row("B0HPFRY2", "Harry Potter and the Chamber of Secrets, Book 2", "2",
+            "B0D229XM3B", "Harry Potter (Narrated by Stephen Fry)", "J.K. Rowling"),
+    ],
+    "SER-CS": [
+        row("B0CS01", "Case Saga 1", "1", "SER-CS", "Case Saga", "Case Author"),
+        row("B0CS02", "Case Saga 2", "2", "SER-CS", "Case Saga", "Case Author"),
+        # Rows Audible should never send and Listenarr relays anyway.
+        {"asin": 123, "title": None},
+        {"asin": "B0CS03", "title": 42, "series": [{"asin": "SER-CS", "position": "nan"}]},
+        {"asin": "B0CS04", "title": "Case Saga Untitled Position",
+         "series": [{"asin": "SER-CS", "position": "inf"}], "authors": [{"name": 7}]},
+        # An unnumbered companion, listed once per marketplace.
+        row("B0CSC1", "Case Saga Companion", None, "SER-CS", "Case Saga", "Case Author"),
+        row("B0CSC2", "Case Saga Companion", None, "SER-CS", "Case Saga", "Case Author"),
+    ],
 }
+PRODUCTS["B0CS01"] = {"title": "Case Saga 1", "_region": "ca",
+                      "series": [{"title": "Case Saga", "sequence": "1", "asin": "SER-CS"}]}
 CANDIDATES = {
     "Harry Potter": [
         {"asin": "B0716WMLJB", "name": "Harry Potter", "region": "ca"},
         {"asin": "B0711PTW7B", "name": "Harry Potter", "region": "ca"},
         {"asin": "B0FJMNG7KH", "name": HP, "region": "ca"},
+        {"asin": "B0D229XM3B", "name": "Harry Potter (Narrated by Stephen Fry)",
+         "region": "ca"},
     ],
 }
 
@@ -144,39 +177,42 @@ listenarr.enqueue_search = lambda audiobook_id: searched.append(audiobook_id) or
 planned = series.plan(matt, DF, anchor_item_id="j2")
 check("series resolved through a member's id", planned["seriesAsin"], "SER-DF")
 check("marketplace follows the member", planned["region"], "ca")
-check("owned by id, title and author, id", sorted(c["asin"] for c in planned["have"]),
-      ["B0DF01", "B0DF02X", "B0DF04"])
-check("one request per position, unnumbered kept",
+check("owned by id, by title and author, by id, and by title within the series",
+      sorted(c["asin"] for c in planned["have"]),
+      ["B0DF01", "B0DF02X", "B0DF04", "B0DFSS", "B0DFSSUS"])
+check("one request per position",
       [c["title"] for c in planned["missing"]],
-      ["Grave Peril", "Death Masks", "Blood Rites", "Side Jobs"])
+      ["Grave Peril", "Death Masks", "Blood Rites"])
 check("nothing on order yet", planned["onOrder"], [])
 
 # --- asking, uncapped -------------------------------------------------------
 outcome = series.want_series(matt, DF, anchor_item_id="j1")
 check("every gap asked for", [c["title"] for c in outcome["requested"]],
-      ["Grave Peril", "Death Masks", "Blood Rites", "Side Jobs"])
+      ["Grave Peril", "Death Masks", "Blood Rites"])
 check("the first edition of a doubled position is the one asked for",
       "B0DF03" in added and "B0DF03US" not in added, True)
-check("owned count is books, not rows", outcome["ownedCount"], 3)
+check("a book owned under a shorter title is not asked for in either listing",
+      "B0DFSS" not in added and "B0DFSSUS" not in added, True)
+check("owned count is books, not rows", outcome["ownedCount"], 4)
 check("nothing held back", outcome["heldBackCount"], 0)
-check("a search is queued per book", len(searched), 4)
+check("a search is queued per book", len(searched), 3)
 check("metadata rides along", all(m is not None for m in metadata_seen), True)
 check("metadata names the series", metadata_seen[0]["series"], DF)
 check("metadata names the store", metadata_seen[0]["region"], "ca")
 check("the sentence names the books",
       outcome["message"],
-      "Asked for 4 books from The Dresden Files: Grave Peril, Death Masks, "
-      "Blood Rites, Side Jobs.")
+      "Asked for 3 books from The Dresden Files: Grave Peril, Death Masks, "
+      "Blood Rites.")
 ledger = {r["asin"] for r in store.requests_for(matt.key)}
-check("the ledger has every request", {"B0DF03", "B0DF05", "B0DF06", "B0DFSS"} <= ledger, True)
+check("the ledger has every request", {"B0DF03", "B0DF05", "B0DF06"} <= ledger, True)
 
 # --- asking again: everything is on order, nothing is re-added ---------------
 before = len(added)
 again = series.want_series(matt, DF)
 check("a second tap adds nothing", len(added), before)
-check("the gaps read as on order", again["onOrderCount"], 4)
+check("the gaps read as on order", again["onOrderCount"], 3)
 check("the sentence says so", again["message"],
-      "You have 3 books of The Dresden Files. The 4 books you do not have are "
+      "You have 4 books of The Dresden Files. The 3 books you do not have are "
       "already being looked for.")
 
 # --- the other marketplace's edition at the same position is owned ----------
@@ -233,6 +269,12 @@ except series.Unresolvable as exc:
 else:
     failures.append("two Audible series called Harry Potter must not be guessed between")
 
+fry = series.plan(matt, "Harry Potter (Stephen Fry)", anchor_item_id="d2")
+check("a name whose every word one series carries resolves to that series",
+      fry["seriesAsin"], "B0D229XM3B")
+check("and its owned position is recognised", [c["title"][-6:] for c in fry["missing"]],
+      ["Book 2"])
+
 CANDIDATES["Harry Potter"] = [
     {"asin": "SER-HP-ONE", "name": "Harry Potter", "region": "ca"},
     {"asin": "B0FJMNG7KH", "name": HP, "region": "ca"},
@@ -268,6 +310,51 @@ except series.Unresolvable as exc:
     check("an empty series says so", "lists no books" in str(exc), True)
 else:
     failures.append("an empty listing must be refused, not asked for")
+
+# --- a book the listener hid is left out, and said to be -------------------
+listenarr.series_books = lambda asin, region=None: SERIES_BOOKS.get(asin)
+refused.clear()
+store.dismiss(matt.key, "B0LS07")
+hid = series.want_series(matt, "Long Saga")
+check("a hidden book is not asked for", hid["requested"], [])
+check("and is counted apart from the ones on order", hid["leftOutCount"], 1)
+check("the sentence says so", hid["message"],
+      "You have 1 book of Long Saga. Another 5 books are already being looked for. "
+      "1 book you hid was left out.")
+store.undismiss(matt.key, "B0LS07")
+
+# --- on order means an unfulfilled request, not a fulfilled one -------------
+store.record_request(kadija.key, "B0FULFILLED", "Done Book")
+store.fulfil_requests(kadija.key, {"B0FULFILLED"})
+check("a fulfilled request is no longer on order",
+      "B0FULFILLED" in store.ordered_asins(), False)
+check("an open one is", "B0LS02" in store.ordered_asins(), True)
+
+# --- ASIN case, and rows that should never arrive ----------------------------
+listenarr.series_books = lambda asin, region=None: SERIES_BOOKS.get(asin)
+store.record_request(kadija.key, "b0cs02", "Case Saga 2")
+cased = series.plan(matt, "Case Saga", anchor_item_id="c1")
+check("a lower-case library id still counts as owned",
+      [c["asin"] for c in cased["have"]], ["B0CS01"])
+check("a lower-case ledger id still counts as on order",
+      [c["asin"] for c in cased["onOrder"]], ["B0CS02"])
+check("a row with no title is skipped; an unnumbered book listed twice is one gap",
+      sorted(c["asin"] for c in cased["missing"]), ["B0CS04", "B0CSC1"])
+check("a non-numeric position is kept as text",
+      cased["missing"][0]["position"], "inf")
+
+# --- the cap can be reached between the check and the attempt ---------------
+real_want = wants.want
+def raced(*args, **kwargs):
+    raise wants.AllowanceExhausted("That is 3 books today.")
+wants.want = raced
+raced_outcome = series.want_series(matt, "Case Saga")
+wants.want = real_want
+check("a cap denial ends the batch", raced_outcome["requested"], [])
+check("and is not reported as a refusal", raced_outcome["failed"], [])
+check("the sentence blames the allowance", raced_outcome["message"],
+      "You have used today's requests. 2 books of Case Saga are still missing. "
+      "Another 1 book is already being looked for.")
 
 # --- positions compare as numbers -------------------------------------------
 check("3 and 3.0 are one position", series._position("3.0"), series._position(3))

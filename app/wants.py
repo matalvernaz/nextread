@@ -26,6 +26,15 @@ class Denied(Exception):
     """The request was refused before anything was acquired."""
 
 
+class AllowanceExhausted(Denied):
+    """Refused because the day's allowance is spent, and for no other reason.
+
+    Its own type so a caller asking for several books can tell the cap from
+    Listenarr declining one of them: the first ends the batch, the second
+    does not.
+    """
+
+
 def allowance(user: jellyfin.User) -> int | None:
     """Requests this account has left today, or None when it is not capped."""
     if user.is_admin:
@@ -62,7 +71,7 @@ def want(
     if remaining is not None and remaining <= 0:
         log.warning("want denied user=%s asin=%s reason=daily-cap cap=%d",
                     user.key, asin, config.WANT_DAILY_CAP)
-        raise Denied(
+        raise AllowanceExhausted(
             f"That is {config.WANT_DAILY_CAP} books today. "
             "The allowance frees up again as the day rolls on.")
 
@@ -70,7 +79,8 @@ def want(
              user.key, asin, title, "uncapped" if remaining is None else remaining)
     # Only named when there is one: the existing callers and their test
     # doubles know `add` by its two-argument shape.
-    result = listenarr.add(asin, metadata=metadata) if metadata else listenarr.add(asin)
+    result = (listenarr.add(asin, metadata=metadata) if metadata is not None
+              else listenarr.add(asin))
     if not result.ok:
         log.warning("want refused user=%s asin=%s reason=%s", user.key, asin, result.message)
         raise Denied(result.message)

@@ -418,7 +418,7 @@ def add(asin: str, monitored: bool = True, metadata: dict | None = None) -> AddR
         return AddResult(
             True, "Already in Listenarr", _audiobook_id(existing), title, authors)
 
-    meta = metadata or audible_metadata(asin)
+    meta = metadata if metadata is not None else audible_metadata(asin)
     if not meta:
         return AddResult(
             False,

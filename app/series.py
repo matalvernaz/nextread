@@ -11,6 +11,7 @@ a time, through the same path a single request takes. Every guard on that path
 -- the allowance, the duplicate check, the ledger, the immediate search --
 applies to each book as if it had been asked for on its own.
 """
+import math
 import re
 
 from . import audible, config, engine, jellyfin, listenarr, logs, shelves, store, wants
@@ -39,6 +40,17 @@ NAMED_TITLES = 5
 _QUALIFIER = re.compile(r"\s*\([^()]*\)\s*$")
 
 
+def _text(value) -> str:
+    """A string field out of a catalogue row, whatever actually arrived in it.
+
+    Listenarr relays Audible's JSON as it comes, and a field that is usually a
+    string is occasionally a number or null. Every field read off a row goes
+    through here so a malformed row is skipped rather than raising past the
+    route as a 500.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _same_series(item: dict, name: str) -> bool:
     """The rule a client groups by: the name, ignoring case and punctuation."""
     return engine._norm(item.get("SeriesName") or "") == engine._norm(name)
@@ -59,6 +71,8 @@ def _position(value) -> str | None:
         number = float(text)
     except ValueError:
         return text.casefold()
+    if math.isnan(number) or math.isinf(number):
+        return text.casefold()
     return str(int(number)) if number == int(number) else str(number)
 
 
@@ -71,13 +85,30 @@ def _row_position(row: dict, series_asin: str) -> str | None:
     """
     memberships = [m for m in (row.get("series") or []) if isinstance(m, dict)]
     for membership in memberships:
-        if (membership.get("asin") or "").upper() == series_asin.upper():
+        if _text(membership.get("asin")).upper() == series_asin.upper():
             return _position(membership.get("position"))
     for membership in memberships:
         position = _position(membership.get("position"))
         if position is not None:
             return position
     return None
+
+
+def _identity(position: str | None, title: str) -> str:
+    """What makes two catalogue rows one book.
+
+    The series position where there is one -- Audible lists both marketplaces'
+    editions of a book as two rows at the same position -- and the title
+    otherwise, because an unnumbered companion volume is listed twice the same
+    way and would be asked for twice.
+    """
+    if position is not None:
+        return f"#{position}"
+    return f"title:{engine._norm(title)}"
+
+
+def _tokens(text: str) -> set[str]:
+    return set(engine._norm(text).split())
 
 
 def _series_from_members(members: list[dict], name: str) -> tuple[str, str] | None:
@@ -93,7 +124,9 @@ def _series_from_members(members: list[dict], name: str) -> tuple[str, str] | No
     unqualified = engine._norm(_QUALIFIER.sub("", name))
     best: tuple[int, str, str] | None = None
     for book in members:
-        asin = engine._asin(book)
+        # Folded, as every ASIN here is: the product cache is keyed by what it
+        # was asked for, and Jellyfin hands back whatever spelling it was given.
+        asin = (engine._asin(book) or "").upper()
         if not asin:
             continue
         product = audible.product(asin)
@@ -103,10 +136,13 @@ def _series_from_members(members: list[dict], name: str) -> tuple[str, str] | No
         primary_name, _ = audible._primary_series(product)
         primary = engine._norm(primary_name or "")
         for membership in product.get("series") or []:
-            series_asin = membership.get("asin")
+            if not isinstance(membership, dict):
+                continue
+            series_asin = _text(membership.get("asin")).upper()
             if not series_asin:
                 continue
-            title = engine._norm(membership.get("title") or membership.get("name") or "")
+            title = engine._norm(
+                _text(membership.get("title")) or _text(membership.get("name")))
             if not title:
                 continue
             if title == wanted:
@@ -130,27 +166,47 @@ def _series_by_name(name: str) -> tuple[str, str] | None:
     """Audible's own series search, trusted only when it is unambiguous.
 
     The fallback for a series none of whose books carries an Audible id --
-    the torrented half of a library. Exactly one series answering to the name
-    is an identification; two is a guess about which edition somebody meant,
-    and a guess here acquires the wrong narrator's books, so it refuses.
+    the torrented half of a library. Three readings of the name are tried in
+    turn, each accepted only when exactly one series answers to it: the name
+    as the library spells it; a series whose name contains every word of it,
+    which is how "Harry Potter (Stephen Fry)" finds "Harry Potter (Narrated by
+    Stephen Fry)" and "Wheel of Time" finds "The Wheel of Time"; and the name
+    with its trailing qualifier dropped. Two matches at any step is a guess
+    about which edition somebody meant, and a guess here acquires the wrong
+    narrator's books, so it refuses rather than trying a looser reading.
     """
-    for candidate in dict.fromkeys([name.strip(), _QUALIFIER.sub("", name).strip()]):
-        if not candidate:
+    full = name.strip()
+    unqualified = _QUALIFIER.sub("", name).strip()
+    rows_by_asin: dict[str, dict] = {}
+    for query in dict.fromkeys([full, unqualified]):
+        if not query:
             continue
-        rows = listenarr.series_candidates(candidate)
+        rows = listenarr.series_candidates(query)
         if rows is None:
             raise Unavailable("Listenarr did not answer.")
-        wanted = engine._norm(candidate)
-        exact = {
-            row["asin"].upper(): row for row in rows
-            if engine._norm(row.get("name") or "") == wanted
-        }
-        if len(exact) == 1:
-            row = next(iter(exact.values()))
-            return row["asin"], (row.get("region") or config.AUDIBLE_REGION)
-        if len(exact) > 1:
+        for row in rows:
+            asin = _text(row.get("asin")).upper()
+            if asin and asin not in rows_by_asin:
+                rows_by_asin[asin] = row
+    if not rows_by_asin:
+        return None
+
+    wanted = engine._norm(full)
+    wanted_tokens = _tokens(full)
+    rules = [
+        lambda listed: listed == wanted,
+        lambda listed: bool(wanted_tokens) and wanted_tokens <= set(listed.split()),
+        lambda listed: bool(unqualified) and listed == engine._norm(unqualified),
+    ]
+    for rule in rules:
+        matches = [(asin, row) for asin, row in rows_by_asin.items()
+                   if rule(engine._norm(_text(row.get("name"))))]
+        if len(matches) == 1:
+            asin, row = matches[0]
+            return asin, (_text(row.get("region")) or config.AUDIBLE_REGION)
+        if len(matches) > 1:
             log.info("series name %r matches %d Audible series; refusing to guess",
-                     candidate, len(exact))
+                     full, len(matches))
             return None
     return None
 
@@ -164,6 +220,10 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
     the Philosopher's and the Sorcerer's Stone are two rows, both book one --
     so without the position rule a library holding every book of the series
     would be asked to acquire all of them again under their other titles.
+
+    "On order" is an unfulfilled request from anybody in the household, and
+    nothing else. A book this listener hid on the Discover shelf is left out
+    and said to be, not folded in with the ones on their way.
     """
     library = jellyfin.books(user.id)
     members = [book for book in library if _same_series(book, name)]
@@ -187,68 +247,97 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
         raise Unresolvable(f"Audible lists no books under {name}.")
 
     asins, by_title = engine._owned_index(library)
-    suppressed = store.suppressed_asins(user.key)
+    # Folded to upper case, as the catalogue rows are below. Jellyfin and the
+    # ledger keep whatever spelling they were handed.
+    asins = {a.upper() for a in asins if isinstance(a, str)}
+    # Within one series a title alone is evidence. The library's own copy can
+    # carry a shorter title than Audible's listing -- "Side Jobs" against
+    # "Side Jobs: Stories from the Dresden Files" -- under an author tag padded
+    # with the series name, which the household-wide check rightly refuses to
+    # take for the same author. Measured on the live library, 2026-09-02.
+    member_titles = {
+        key for book in members for key in engine._title_keys(book.get("Name") or "")
+    }
+    ordered = {a.upper() for a in store.ordered_asins()}
+    hidden = {a.upper() for a in store.dismissed_asins(user.key)}
+
     # Two passes. A row is judged on its own first -- owned by id or by title
-    # and author, or already on order -- and only then by position, because
-    # the two editions of one book can arrive in either order and the second
-    # must not be planned for as a gap when the first turns out to be owned.
-    owned_positions = {
-        position for book in members
+    # and author, on order, or hidden -- and only then by what it shares an
+    # identity with, because the two editions of one book can arrive in either
+    # order and the second must not be planned for as a gap when the first
+    # turns out to be owned.
+    owned_keys = {
+        _identity(position, "") for book in members
         if (position := _position(book.get("IndexNumber"))) is not None
     }
     candidates: list[dict] = []
     seen: set[str] = set()
     for row in rows:
-        asin = (row.get("asin") or "").upper()
+        if not isinstance(row, dict):
+            continue
+        asin = _text(row.get("asin")).upper()
         if not asin or asin in seen:
             continue
         seen.add(asin)
+        title = _text(row.get("title"))
+        if not title:
+            # Nothing to recognise it by and nothing to ask for it under.
+            log.info("series row %s has no title; skipped", asin)
+            continue
         position = _row_position(row, series_asin)
         candidate = {
             "asin": asin,
-            "title": (row.get("title") or "").strip(),
-            "authors": [a.get("name", "") for a in (row.get("authors") or [])
-                        if isinstance(a, dict) and a.get("name")],
+            "title": title,
+            "authors": [_text(a.get("name")) for a in (row.get("authors") or [])
+                        if isinstance(a, dict) and _text(a.get("name"))],
             "position": position,
+            "key": _identity(position, title),
         }
-        candidate["owned"] = engine._already_owned(candidate, asins, by_title)
-        candidate["ordered"] = not candidate["owned"] and asin in suppressed
-        if candidate["owned"] and position is not None:
-            owned_positions.add(position)
+        candidate["owned"] = (engine._already_owned(candidate, asins, by_title)
+                              or bool(engine._title_keys(title) & member_titles))
+        candidate["ordered"] = not candidate["owned"] and asin in ordered
+        candidate["hidden"] = (not candidate["owned"] and not candidate["ordered"]
+                               and asin in hidden)
+        if candidate["owned"]:
+            owned_keys.add(candidate["key"])
         candidates.append(candidate)
-    ordered_positions = {
-        c["position"] for c in candidates if c["ordered"] and c["position"] is not None
-    }
+    ordered_keys = {c["key"] for c in candidates if c["ordered"]}
+    hidden_keys = {c["key"] for c in candidates if c["hidden"]}
+
     have: list[dict] = []
     on_order: list[dict] = []
+    left_out: list[dict] = []
     missing: list[dict] = []
-    missing_positions: set[str] = set()
+    missing_keys: set[str] = set()
     for candidate in candidates:
-        position = candidate["position"]
-        if candidate["owned"] or (position is not None and position in owned_positions):
+        key = candidate["key"]
+        if candidate["owned"] or key in owned_keys:
             have.append(candidate)
-        elif candidate["ordered"] or (position is not None and position in ordered_positions):
+        elif candidate["ordered"] or key in ordered_keys:
             on_order.append(candidate)
-        elif position is not None and position in missing_positions:
-            # The other marketplace's edition of a gap already planned for.
-            # One book, one request.
+        elif candidate["hidden"] or key in hidden_keys:
+            left_out.append(candidate)
+        elif key in missing_keys:
+            # The other edition of a gap already planned for. One book, one
+            # request.
             continue
         else:
             missing.append(candidate)
-            if position is not None:
-                missing_positions.add(position)
+            missing_keys.add(key)
 
     log.info("series plan user=%s series=%r asin=%s region=%s listed=%d have=%d "
-             "on_order=%d missing=%d", user.key, name, series_asin, region,
-             len(seen), len(have), len(on_order), len(missing))
+             "on_order=%d hidden=%d missing=%d", user.key, name, series_asin, region,
+             len(seen), len(have), len(on_order), len(left_out), len(missing))
     return {
         "series": name,
         "seriesAsin": series_asin,
         "region": region,
         "have": have,
         "onOrder": on_order,
+        "leftOut": left_out,
         "missing": missing,
-        "rows": {(row.get("asin") or "").upper(): row for row in rows},
+        "rows": {_text(row.get("asin")).upper(): row
+                 for row in rows if isinstance(row, dict)},
     }
 
 
@@ -279,9 +368,14 @@ def want_series(user: jellyfin.User, name: str,
             planned["rows"][candidate["asin"]], region=planned["region"])
         try:
             wants.want(user, candidate["asin"], candidate["title"], metadata=metadata)
+        except wants.AllowanceExhausted:
+            # Another request on this account landed between the check above
+            # and the attempt. The cap held; only the accounting is owed.
+            cap_hit = True
+            break
         except wants.Denied as denied:
             # One book Listenarr would not take is not a reason to stop asking
-            # for the others; the allowance was checked before the attempt.
+            # for the others.
             failed.append({**candidate, "reason": str(denied)})
             continue
         requested.append(candidate)
@@ -295,28 +389,29 @@ def want_series(user: jellyfin.User, name: str,
              user.key, name, len(requested), len(failed), held_back, cap_hit)
     owned_count = _distinct_books(planned["have"])
     on_order_count = _distinct_books(planned["onOrder"])
+    left_out_count = _distinct_books(planned["leftOut"])
     return {
         "series": name,
         "seriesAsin": planned["seriesAsin"],
         "ownedCount": owned_count,
         "onOrderCount": on_order_count,
+        "leftOutCount": left_out_count,
         "requested": [{"asin": c["asin"], "title": c["title"]} for c in requested],
         "failed": [{"asin": c["asin"], "title": c["title"], "reason": c["reason"]}
                    for c in failed],
         "heldBackCount": held_back,
         "message": sentence(
             name, owned_count=owned_count, on_order=on_order_count,
+            left_out=left_out_count,
             requested=[c["title"] for c in requested],
             failed=[c["title"] for c in failed],
             held_back=held_back, cap_hit=cap_hit, missing=len(missing)),
     }
 
 
-def _distinct_books(have: list[dict]) -> int:
-    """Books owned, counting the two editions Audible lists at one position once."""
-    positions = {c["position"] for c in have if c["position"] is not None}
-    unpositioned = sum(1 for c in have if c["position"] is None)
-    return len(positions) + unpositioned
+def _distinct_books(candidates: list[dict]) -> int:
+    """Books, counting the two editions Audible lists of one book once."""
+    return len({c["key"] for c in candidates})
 
 
 def _named(titles: list[str]) -> str:
@@ -333,21 +428,28 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def sentence(name: str, *, owned_count: int, on_order: int, requested: list[str],
-             failed: list[str], held_back: int, cap_hit: bool, missing: int) -> str:
+def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
+             requested: list[str], failed: list[str], held_back: int,
+             cap_hit: bool, missing: int) -> str:
     """What to say about the outcome, in full, because the row that would have
     carried it is on another screen and the tap has nothing else to show for
     itself."""
     parts: list[str] = []
     if not missing:
-        if on_order:
+        if not on_order and not left_out:
+            return (f"You already have every book Audible lists in {name}: "
+                    f"{_plural(owned_count, 'book')}.")
+        parts.append(f"You have {_plural(owned_count, 'book')} of {name}.")
+        if on_order and not left_out:
             parts.append(
-                f"You have {_plural(owned_count, 'book')} of {name}. "
-                f"The {_plural(on_order, 'book') if on_order != 1 else 'one'} you do not have "
-                f"{'are' if on_order != 1 else 'is'} already being looked for.")
-        else:
-            parts.append(f"You already have every book Audible lists in {name}: "
-                         f"{_plural(owned_count, 'book')}.")
+                f"The {_plural(on_order, 'book') if on_order != 1 else 'one'} you do not "
+                f"have {'are' if on_order != 1 else 'is'} already being looked for.")
+        elif on_order:
+            parts.append(f"Another {_plural(on_order, 'book')} "
+                         f"{'is' if on_order == 1 else 'are'} already being looked for.")
+        if left_out:
+            parts.append(f"{_plural(left_out, 'book')} you hid "
+                         f"{'was' if left_out == 1 else 'were'} left out.")
         return " ".join(parts)
 
     if requested:
@@ -369,4 +471,7 @@ def sentence(name: str, *, owned_count: int, on_order: int, requested: list[str]
     if on_order:
         parts.append(f"Another {_plural(on_order, 'book')} "
                      f"{'is' if on_order == 1 else 'are'} already being looked for.")
+    if left_out:
+        parts.append(f"{_plural(left_out, 'book')} you hid "
+                     f"{'was' if left_out == 1 else 'were'} left out.")
     return " ".join(parts)
