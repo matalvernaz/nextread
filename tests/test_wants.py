@@ -127,6 +127,37 @@ rows = {r["asin"]: r for r in wants.states(
     matt.key, (set(), {"second ascension": {"reece brooks"}}))}
 assert rows["B0GMRVTV5R"]["state"] == wants.IN_LIBRARY, rows["B0GMRVTV5R"]
 
+# Two shapes the shelf spells differently, both live on 2026-09-04 with the book
+# already playing from the library: a qualifier in parentheses that the tagger
+# drops, and a series named before the colon that the tagger does not repeat.
+listenarr.add = lambda asin, monitored=True: listenarr.AddResult(
+    True, "Sent to Listenarr", 46,
+    "The House of Hades (Heroes of Olympus Book 4)", ("Rick Riordan",))
+wants.want(matt, "B079XJZT89", "The House of Hades (Heroes of Olympus Book 4)")
+listenarr.add = lambda asin, monitored=True: listenarr.AddResult(
+    True, "Sent to Listenarr", 47,
+    "The Heroes of Olympus: The Demigod Diaries", ("Rick Riordan",))
+wants.want(matt, "B071YTGJTR", "The Heroes of Olympus: The Demigod Diaries")
+riordan = (set(), {"the house of hades": {"rick riordan"},
+                   "the demigod diaries": {"rick riordan"}})
+rows = {r["asin"]: r for r in wants.states(matt.key, riordan)}
+assert rows["B079XJZT89"]["state"] == wants.IN_LIBRARY, rows["B079XJZT89"]
+assert rows["B071YTGJTR"]["state"] == wants.IN_LIBRARY, rows["B071YTGJTR"]
+
+# The wider keys still need the author to agree where both sides have one.
+listenarr.add = lambda asin, monitored=True: listenarr.AddResult(
+    True, "Sent to Listenarr", 48, "Some Series: The Demigod Diaries", ("Not Riordan",))
+wants.want(matt, "B0OTHERDD", "Some Series: The Demigod Diaries")
+rows = {r["asin"]: r for r in wants.states(matt.key, riordan)}
+assert rows["B0OTHERDD"]["state"] != wants.IN_LIBRARY, rows["B0OTHERDD"]
+
+# A tail that is only a volume label is not a title to be found under.
+listenarr.add = lambda asin, monitored=True: listenarr.AddResult(
+    True, "Sent to Listenarr", 49, "Nameless Saga: Book 1", ("Nobody",))
+wants.want(matt, "B0VOLONLY", "Nameless Saga: Book 1")
+rows = {r["asin"]: r for r in wants.states(matt.key, (set(), {"book 1": set()}))}
+assert rows["B0VOLONLY"]["state"] != wants.IN_LIBRARY, rows["B0VOLONLY"]
+
 
 # --- suppression is global, dismissal is personal ---------------------------
 assert "ASIN0" in store.suppressed_asins("someone-else"), \

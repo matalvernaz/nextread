@@ -5,6 +5,7 @@ guards an acquisition -- the daily allowance, the duplicate check, the ledger
 entry, the immediate search -- lives here, so a second caller cannot be added
 later that quietly skips half of it.
 """
+import re
 import time
 
 from . import config, engine, jellyfin, listenarr, logs, store
@@ -232,13 +233,50 @@ def _arrived(row: dict, asins: set, by_title: dict) -> bool:
     if row["asin"] in asins:
         return True
     wanted = {engine._norm_author(a) for a in row.get("authors") or []}
-    for key in engine._title_keys(row.get("title") or ""):
+    for key in _requested_title_keys(row.get("title") or ""):
         if key not in by_title:
             continue
         owners = by_title[key]
         if not owners or not wanted or (wanted & owners):
             return True
     return False
+
+
+_TRAILING_PARENTHETICAL = re.compile(r"\s*\([^()]*\)\s*$")
+# A tail that is only a volume label is not a title: "Splinter Angel: Book 1"
+# must not be found under "book 1".
+_VOLUME_ONLY = re.compile(r"^(book|bk|vol|volume|part|no|number)\s+\S+$")
+
+
+def _requested_title_keys(title: str) -> set[str]:
+    """Forms a requested title may take on the shelf.
+
+    Wider than `engine._title_keys`, on purpose. That one keeps the head of a
+    colon split and nothing else, which is right for the owned check it serves
+    -- a suggestion tested against three thousand titles must not over-match --
+    and too narrow here, where the title was asked for by name and an author
+    still has to agree. Two live shapes it could not see, both stuck at "still
+    looking" on 2026-09-04 with the book already playing from the library:
+
+    - a trailing qualifier in parentheses: "The House of Hades (Heroes of
+      Olympus Book 4)" is filed as "The House of Hades";
+    - a series before the colon: "The Heroes of Olympus: The Demigod Diaries"
+      is filed as "The Demigod Diaries".
+    """
+    keys = set(engine._title_keys(title))
+    bare = _TRAILING_PARENTHETICAL.sub("", title).strip()
+    if bare and bare != title:
+        keys |= engine._title_keys(bare)
+    for text in {title, bare}:
+        for sep in (":", " - ", " \u2014 "):
+            if sep not in text:
+                continue
+            tail = engine._norm(text.split(sep, 1)[1])
+            # Two words minimum, as `_title_keys` asks of a head, or short
+            # titles collide across unrelated books.
+            if tail and len(tail.split()) >= 2 and not _VOLUME_ONLY.match(tail):
+                keys.add(tail)
+    return keys
 
 
 def _request_row(user_key: str, asin: str) -> dict | None:
